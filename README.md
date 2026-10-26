@@ -60,6 +60,9 @@ feature 不叫 `windows`：在一个整体仅 Windows 的 crate 上，`--feature
 | 目标目录没在任何标签开过 | shell 开一个新标签并选中 | 同左 |
 | 目标目录在**后台标签** | 你正在看的标签**不动**，把目标标签带到前台并选中；实测代价是会为该目录多出一个标签（重复 reveal 会累积标签） | 把你正在看的标签**导航**到目标目录：不新增标签，代价是那个标签原来的内容被替换 |
 
+第三行两种代价都由真机用例守着：`overwrite` 这一档在 `tests/ui_reveal.rs` 里实测到总标签数不变、
+目标目录 +1 个标签、正在看的标签 −1 个、标题栏换成目标目录（见「测试」）。
+
 ## 实现选型（第一性原理 + 奥卡姆剃刀）
 
 不可再还原的事实只有三条：
@@ -208,21 +211,31 @@ shell 丢掉的那一次选中补回来。
   `--helpme` 与出现在第二个位置的 `--help` 仍按普通参数处理，`REVEAL_DRY_RUN` 的 `0|false|NO|空` 确实关到了
   "会去读标签策略"的程度而 `1|true|YES` 确实跳过了整个 shell 分支，以及 dry-run 下的精确路径回显。
   每个用例都先 `env_remove` 掉两个配置项，避免跑 cargo 的那个 shell 里残留的变量改变观察结果。
-- `tests/ui_reveal.rs` 1 个 `#[ignore]` opt-in 测试，`REVEAL_UI_TEST=1` 时真实弹窗，三段断言：
+- `tests/ui_reveal.rs` 2 个 `#[ignore]` opt-in 测试，`REVEAL_UI_TEST=1` 时真实弹窗。第一个三段断言：
   ① 退出码 0 **且** UIA 读到 `IsSelected=True` **且**没有以该文件名为标题的 `Edit`（没进重命名态）；
   ② 同目录第二次 reveal，断言视图数 ≥1 且不变（视图数断言前先校验非 0，否则"没多开窗口"会因为
   查询本身失效而虚假通过）；③ 把承载夹具的窗口**最小化**后第三次 reveal，断言窗口不再最小化
-  且文件高亮——这一步专门守着"窗口看不见时选中不可见"这一类回归。收尾 `WM_CLOSE` 只关那些
+  且文件高亮——这一步专门守着"窗口看不见时选中不可见"这一类回归。
+  第二个守 `overwrite`：先用默认策略开两个夹具目录（target 在先、foreground 在后），断言标题栏上是
+  foreground 而不是 target——本机若没把两者并进同一个窗口，就没有"可覆盖的可见标签"这回事，测试
+  直接红而不是假装通过；再 `overwrite` reveal target 里的第二个文件，断言退出 0 + UIA 高亮 +
+  无重命名态，且**总标签数不变**、target 标签 +1、foreground 标签 −1、标题栏换成 target 且不再是
+  foreground。注意 UIA 那半边只证明"选中落在某个标签上"：26100 实测后台标签的 ListItem 同样留在
+  UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看得见"只能靠标题栏前缀那条判断，
+  也正是工具自己唯一的可见标签信号。
+  两个测试共用一把进程内 `Mutex`：它们读同一个桌面、同一个标签窗口的标题栏，并行会互相改掉对方的
+  标题（首次真机跑就是这样废掉一条断言的）。收尾 `WM_CLOSE` 只关那些
   标签全部属于夹具的窗口（共用 HWND 的窗口里有用户自己的标签）。
   该测试会在当前资源管理器窗口里留下标签（shell 会把新目录并入已有窗口），跑完请手动 `Ctrl+W`。
 - `tests/latency.rs` 1 个 `#[ignore]` opt-in 测试，`REVEAL_LATENCY_TEST=1` 时真实弹窗测时延，
   只打印不断言（见上一节）。
 
 基线：仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（`--help`、`REVEAL_DRY_RUN` 取值校验与时延基线之后，两种形态各跑一遍，结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 2 ignored；
+最近一次全量复验（`--help`、`REVEAL_DRY_RUN` 取值校验、时延基线与 `overwrite` 真机验证之后，
+两种形态各跑一遍，结果相同）：
+`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 3 ignored；
 `cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
-`REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 1 passed。
+`REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 2 passed。
 
 ## 时延基线
 
