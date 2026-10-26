@@ -2,6 +2,10 @@
 name = "win-reveal"
 version = "0.1.0"
 edition = "2021"
+# Verified floor, not an aspirational one: `cargo +1.88.0 check --all-targets` (both binding
+# flavours) and `cargo +1.88.0 test --doc` pass here. The source only uses features as old as
+# let-else, but lower than 1.88 is unmeasured on this machine — no older toolchain installed.
+rust-version = "1.88"
 description = "Windows-only: open a file's containing folder in Explorer and select the item"
 license = "MIT"
 repository = "https://github.com/jinghu-moon/win-reveal"

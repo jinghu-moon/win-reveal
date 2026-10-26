@@ -564,13 +564,16 @@ pub fn front_window_for(parent: &Path) -> Option<i64> {
     shown.or(hidden)
 }
 
-/// What to do when `parent` is already open, but in a tab the user is not looking at.
+/// What to do when the containing folder is already open, but in a tab the user is not
+/// looking at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Switch {
-    /// Leave the tab the user is reading alone and bring the folder's own tab forward.
+    /// Leave the tab the user is reading alone and bring the folder's own tab forward. The
+    /// switch itself has to be done by the shell, and on build 26100 that costs the folder
+    /// a duplicate tab.
     NewTab,
     /// Navigate the tab the user is reading to the folder, so no tab is ever switched to
-    /// and none is added — the existing tab is repurposed.
+    /// and none is added — the existing tab is repurposed, and whatever it showed is gone.
     Overwrite,
 }
 

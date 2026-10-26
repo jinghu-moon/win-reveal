@@ -6,6 +6,22 @@
 //! namespace, never through a command line, so spaces, CJK text and commas in names
 //! cannot be mis-parsed.
 //!
+//! # From inside another program
+//!
+//! ```no_run
+//! use win_reveal::{Revealer, ShellRevealer};
+//!
+//! let target = std::env::current_exe().unwrap();
+//! match ShellRevealer.reveal(&target) {
+//!     Ok(()) => println!("Explorer is showing it"),
+//!     Err(e) => eprintln!("could not reveal: {e}"),
+//! }
+//! ```
+//!
+//! Marked `no_run`: a doctest that opened an Explorer window on every `cargo test` would
+//! make this crate a hostile dependency. [`ShellRevealer::reveal_with`] is the same call
+//! with the tab policy passed in rather than read from the process environment.
+//!
 //! [`SHOpenFolderAndSelectItems`]: https://learn.microsoft.com/windows/win32/api/shlobj_core/nf-shlobj_core-shopenfolderandselectitems
 
 #[cfg(not(windows))]
@@ -27,7 +43,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
-use automation::Switch;
+// The tab policy is a caller's choice, not an implementation detail: the CLI expresses it as
+// `REVEAL_TAB_POLICY`, a library host passes it to [`ShellRevealer::reveal_with`].
+pub use automation::Switch;
 
 /// Process exit code when the reveal request was handed to the shell successfully.
 pub const EXIT_OK: i32 = 0;
@@ -97,6 +115,10 @@ impl fmt::Display for Error {
     }
 }
 
+/// So a caller's own `fn …() -> Result<T, Box<dyn Error>>` or `anyhow` chain can take the
+/// `?` from [`Revealer::reveal`] without wrapping.
+impl std::error::Error for Error {}
+
 /// The single injectable boundary between argument handling and the shell.
 ///
 /// Production uses [`ShellRevealer`]; tests substitute a recorder so no Explorer
@@ -107,11 +129,28 @@ pub trait Revealer {
 }
 
 /// Reveals through the real Windows shell.
+///
+/// As a [`Revealer`] it takes the tab policy from the `REVEAL_TAB_POLICY` environment
+/// variable, which is what a CLI wants. A library caller that would rather not put its
+/// configuration into its own process environment calls [`ShellRevealer::reveal_with`] and
+/// passes the policy as an argument instead.
 pub struct ShellRevealer;
 
-impl Revealer for ShellRevealer {
-    fn reveal(&self, path: &Path) -> Result<(), Error> {
-        let switch = tab_policy(env::var_os(TAB_POLICY_VAR))?;
+impl ShellRevealer {
+    /// Open the folder containing `path` and select it, with the tab policy given directly.
+    ///
+    /// `switch` decides what happens when that folder is already open in a tab the user is
+    /// not looking at — see [`Switch`]. This is [`Revealer::reveal`] minus the environment
+    /// lookup, and the entry point a GUI host should call.
+    ///
+    /// ```no_run
+    /// use win_reveal::{ShellRevealer, Switch};
+    ///
+    /// // Any existing file or folder with a containing directory.
+    /// let target = std::env::current_exe().unwrap();
+    /// ShellRevealer::reveal_with(&target, Switch::Overwrite).unwrap();
+    /// ```
+    pub fn reveal_with(path: &Path, switch: Switch) -> Result<(), Error> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         // Every shell call below is COM-based and requires an initialized apartment;
         // a fresh CLI process has none.
@@ -135,6 +174,13 @@ impl Revealer for ShellRevealer {
         };
         unsafe { ffi::CoUninitialize() };
         result
+    }
+}
+
+impl Revealer for ShellRevealer {
+    fn reveal(&self, path: &Path) -> Result<(), Error> {
+        let switch = tab_policy(env::var_os(TAB_POLICY_VAR))?;
+        ShellRevealer::reveal_with(path, switch)
     }
 }
 
@@ -339,6 +385,30 @@ pub fn resolve(raw: &std::ffi::OsStr, cwd: &Path) -> Result<PathBuf, Error> {
 
 /// Full CLI entry point: parse `args`, reveal, and report to `stderr`.
 /// Returns the process exit code.
+///
+/// The `revealer` and the writer are parameters rather than `ShellRevealer` and
+/// [`std::io::stderr`], so a host can run the whole CLI over its own argument list without
+/// an Explorer window appearing:
+///
+/// ```
+/// use std::path::Path;
+/// use win_reveal::{run, RecordingRevealer, EXIT_OK, EXIT_USAGE};
+///
+/// let path = std::env::current_exe().unwrap().as_os_str().to_owned();
+/// let recorder = RecordingRevealer::default();
+/// let mut messages: Vec<u8> = Vec::new();
+///
+/// // One argument: the recorder stands in for the shell, so nothing opens.
+/// let code = run(&[path.clone()], Path::new("."), &recorder, &mut messages);
+/// assert_eq!(code, EXIT_OK);
+/// assert_eq!(recorder.recorded().len(), 1);
+///
+/// // Two arguments: a usage error, reported into the writer that was handed in.
+/// let code = run(&[path.clone(), path], Path::new("."), &recorder, &mut messages);
+/// assert_eq!(code, EXIT_USAGE);
+/// assert_eq!(recorder.recorded().len(), 1, "the rejected call must not reveal anything");
+/// assert!(String::from_utf8_lossy(&messages).contains("expected exactly 1 file path argument"));
+/// ```
 pub fn run(
     args: &[OsString],
     cwd: &Path,
@@ -702,5 +772,14 @@ mod tests {
             assert_eq!(err.lines().last(), Some(USAGE), "{args:?}");
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn error_type_plugs_into_a_callers_error_chain() {
+        // A host writing `fn f() -> Result<(), Box<dyn Error>>` can only take `?` from
+        // `reveal` if our error type is itself an error type. Nothing else in the suite would
+        // notice the impl going away, because no test names it.
+        fn takes<E: std::error::Error>() {}
+        takes::<Error>();
     }
 }

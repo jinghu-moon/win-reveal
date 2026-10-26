@@ -33,6 +33,42 @@ feature 不叫 `windows`：在一个整体仅 Windows 的 crate 上，`--feature
 只是绑定由微软生成，产物大 1,024 B、编译期多出 `windows-core` 等 crate。被本项目依赖时按
 需要选一种即可，两者的可观察行为与退出码完全一致。
 
+## 作为库使用
+
+```rust
+use win_reveal::{Revealer, ShellRevealer, Switch};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let target = std::env::current_exe()?;      // 任何存在且有父目录的路径
+    ShellRevealer.reveal(&target)?;             // 标签策略来自 REVEAL_TAB_POLICY
+    ShellRevealer::reveal_with(&target, Switch::Overwrite)?;  // 或者当参数给
+    Ok(())
+}
+```
+
+`Error` 实现了 `std::error::Error`，所以上面这两个 `?` 直接落在调用方自己的
+`Result<_, Box<dyn Error>>`（或 `anyhow`）链路里，不需要先包一层新错误类型。
+
+公开面就这些，其余（`automation`、`ffi`、`normalize`、标签切换的实现）都是模块私有的：
+
+| 项 | 位置 | 给宿主项目做什么 |
+|:--|:--|:--|
+| `trait Revealer` / `ShellRevealer` / `RecordingRevealer` | [src/lib.rs:126](src/lib.rs#L126) / [:137](src/lib.rs#L137) / [:295](src/lib.rs#L295) | 唯一的注入边界；recorder 让宿主自己的测试不必弹资源管理器 |
+| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:153](src/lib.rs#L153) | 与 `Revealer::reveal` 同一条路，只是策略来自参数——库宿主不该为了选策略去动**自己进程**的 env（`set_var` 在新 edition 里已是 unsafe，而且会被子进程继承） |
+| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:570](src/automation.rs#L570)，由 [src/lib.rs:48](src/lib.rs#L48) 再导出 | 两个变体的文档写的是实测代价，不是字面含义 |
+| `enum Error`（7 个变体） | [src/lib.rs:74](src/lib.rs#L74) | `NotFound` / `NoParent` / `BadSetting` / `Shell{step, hresult}` 可分派，`Display` 文案与 CLI 一致 |
+| `resolve(raw, cwd)` | [src/lib.rs:364](src/lib.rs#L364) | 只做形态归一＋绝对化＋存在性与父目录检查，完全不碰 shell |
+| `run(args, cwd, revealer, stderr) -> i32` | [src/lib.rs:412](src/lib.rs#L412) | 整套 CLI 语义，但 cwd、stderr、实现都是参数，可嵌进 GUI 或自己的命令行 |
+| `EXIT_OK`/`EXIT_SHELL`/`EXIT_USAGE`、`USAGE`、`DRY_RUN_VAR`、`dry_run_setting()` | [src/lib.rs:51-70](src/lib.rs#L51)、[:221](src/lib.rs#L221) | 包装 `run` 时不必抄数字；复用同一行 usage 与同一套取值规则 |
+
+**MSRV**：`rust-version = "1.88"`。这是**实测过的最低工具链**——本机装了 1.88.0，
+`cargo +1.88.0 check --all-targets`（两种形态）与 `cargo +1.88.0 test --doc` 都通过；源码里最新
+也只用到 let-else 这一档，但更低的版本本机没装、没实测，就不写进元数据。
+
+**库用法的示例是编译过的**：`src/lib.rs` 有 3 条 doctest。碰真实 shell 的两条标了 `no_run`
+（只编译，绝不替 `cargo test` 弹资源管理器），`run` 那条用 `RecordingRevealer` 真跑，断言退出码、
+被记录的路径与写进 stderr 的文案——README 里教的那行 `[dependencies]` 因此有守卫。
+
 ## 退出码
 
 | 码 | 含义 |
@@ -53,6 +89,8 @@ feature 不叫 `windows`：在一个整体仅 Windows 的 crate 上，`--feature
 
 `REVEAL_TAB_POLICY=newtab|overwrite`（默认 `newtab`，取值不区分大小写；其它写法直接报错退出 2，
 不静默按默认走）。它只影响一种局面：**目标目录已经开着，但在你正在看的标签之外**。
+库宿主不用改自己进程的环境变量：`ShellRevealer::reveal_with(path, Switch::Overwrite)` 把同一个
+选择作为参数接收（见[作为库使用](#作为库使用)）。
 
 | 起始状态 | `newtab`（默认） | `overwrite` |
 |:--|:--|:--|
@@ -190,12 +228,16 @@ shell 丢掉的那一次选中补回来。
 
 - 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；二进制的
   `REVEAL_DRY_RUN=1|true|yes` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
-- `src/lib.rs` 单元测试 22 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
+- `src/lib.rs` 单元测试 23 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
   目录输入、尾分隔符、`..`、盘根拒绝、shell 失败映射为退出码 1、`REVEAL_TAB_POLICY` 默认值/
   大小写/非法值、`REVEAL_DRY_RUN` 的开/关/非法三档映射、每条 usage 错误以 `USAGE` 常量收尾
-  （`--help` 里嵌的是同一个常量），以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、
+  （`--help` 里嵌的是同一个常量）、`Error` 确实实现了 `std::error::Error`（否则宿主项目的 `?`
+  编译不过，而这没有别处守着），以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、
   `\\?\UNC\` 还原成 UNC、盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；外加
   `src/automation.rs` 中路径匹配与标题可见性（前缀边界、中文、空名）6 个纯函数测试。
+- doctest 3 条（`cargo test --doc`）：crate 级与 `reveal_with` 两条标 `no_run`——它们调用真实
+  shell，编译校验足够，执行就会在开发机上弹资源管理器窗口；`run` 一条用 `RecordingRevealer`
+  真跑，断言退出码、记录到的路径与写进 `stderr` 缓冲的文案。
 - `src/crosscheck.rs` 2 个交叉校验（只在 `cargo test` 编译，二进制不依赖它；只解析
   PIDL，**绝不调用** `SHOpenFolderAndSelectItems`，因此不开窗口）：
   ① 同一个 `\\?\…` 路径，官方 `Shell::SHParseDisplayName` 与我们的声明返回**同一个**
@@ -231,10 +273,11 @@ shell 丢掉的那一次选中补回来。
   只打印不断言（见上一节）。
 
 基线：仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（`--help`、`REVEAL_DRY_RUN` 取值校验、时延基线与 `overwrite` 真机验证之后，
-两种形态各跑一遍，结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 3 ignored；
-`cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
+最近一次全量复验（库面适配：`Switch` 再导出、`reveal_with`、`Error : std::error::Error`、
+`rust-version` 之后，两种形态各跑一遍，结果相同）：
+`cargo test` 与 `cargo test --features official-bindings` → 50 passed, 0 failed, 3 ignored，
+另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
+`cargo +1.88.0 check --all-targets` 与 `cargo +1.88.0 test --doc` 通过（MSRV 实测）；
 `REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 2 passed。
 
 ## 时延基线

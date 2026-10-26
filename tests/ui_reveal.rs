@@ -274,9 +274,11 @@ fn visible_in_title(titles: &[String], dir: &Path) -> bool {
         let title = title.to_lowercase();
         [leaf.as_ref(), full.as_ref()].into_iter().any(|head| {
             let head = head.to_lowercase();
+            // The same rule the tool applies to its own candidate tabs (automation's
+            // `titles_tab`), so the assertion reads the shell the way the code does.
             !head.is_empty()
-                && title.starts_with(&head)
-                && title.get(head.len()..).is_none_or(|rest| rest.starts_with(' '))
+                && (title == head
+                    || (title.starts_with(&head) && title[head.len()..].starts_with(' ')))
         })
     })
 }
