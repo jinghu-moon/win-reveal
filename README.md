@@ -215,12 +215,55 @@ shell 丢掉的那一次选中补回来。
   且文件高亮——这一步专门守着"窗口看不见时选中不可见"这一类回归。收尾 `WM_CLOSE` 只关那些
   标签全部属于夹具的窗口（共用 HWND 的窗口里有用户自己的标签）。
   该测试会在当前资源管理器窗口里留下标签（shell 会把新目录并入已有窗口），跑完请手动 `Ctrl+W`。
+- `tests/latency.rs` 1 个 `#[ignore]` opt-in 测试，`REVEAL_LATENCY_TEST=1` 时真实弹窗测时延，
+  只打印不断言（见上一节）。
 
 基线：仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（`--help` 与 `REVEAL_DRY_RUN` 取值校验之后，两种形态各跑一遍，结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 1 ignored；
+最近一次全量复验（`--help`、`REVEAL_DRY_RUN` 取值校验与时延基线之后，两种形态各跑一遍，结果相同）：
+`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 2 ignored；
 `cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
 `REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 1 passed。
+
+## 时延基线
+
+`tests/latency.rs` 在**真实弹窗**下测端到端 wall clock：计时点在父进程，包住
+`Command::output()` 的整个往返——那是调用者实际等的时间，含进程启动本身。二进制里没有塞任何
+计时代码：A/B 两档是"不碰 COM"的地板，C..F 减掉 A 就是 shell 那一段的代价。
+
+本机（build 26100，一个资源管理器窗口里 13-17 个标签——探针要遍历的标签数就是它的输入），
+两种形态各跑一遍：
+
+| 档 | 场景 | 零依赖形态 ms | 官方绑定形态 ms |
+|:--|:--|:--|:--|
+| A | `--help`：进程启动+退出，不进 COM | 18（18 – 19） | 19（18 – 161） |
+| B | dry run：再加 `resolve()` 与存在性检查，仍不进 COM | 19（18 – 34） | 19（18 – 34） |
+| C | 冷：目标目录没在任何标签开过 | 1187（1088 – 2091） | 1711（1171 – 2593） |
+| D | 暖：目录就是可见标签、条目已在列表里（同一文件第二次 reveal） | 65（63 – 186） | 71（69 – 97） |
+| E | 暖但条目**刚写入**：先等 Explorer 刷新，再落到 shell | 574（565 – 1070） | 595（343 – 1289） |
+| F | 后台标签 + 默认 `newtab` 策略 | 1521（1451 – 1549） | 1703（1697 – 1741） |
+
+括号里是 min – max，括号外是 median。
+
+- **地板 18 ms，dry run 只多 1 ms**：参数解析、路径归一与 `exists()` 都不是瓶颈。
+- **暖路径只贵 ~47 ms**（D − A）：`CoInitializeEx` + 遍历 13-17 个标签的 `IDispatch` 迟到绑定
+  + `SelectItem` + 置前。"在你正看着的文件夹里换选一个文件"就这么多代价。
+- **秒级全部花在等，不花在调用**：C/E/F 的量级来自两段有上限的等待——
+  `select_in_already_open_view` 对"条目还没进列表"按 200 ms 重试（≤10 次），
+  `ensure_selected` 对新开标签按 200 ms 轮询（≤15 次，即 3 s 上限）。E 的 574 ms、
+  F 的 1.5 s 就是这两段在真实机器上的实际取值。
+- **冷档的首个样本最贵**：零依赖形态四个原始取值依次 2091/1088/1239/1136 ms，第一条多出的
+  约 1 s 是本会话第一次激活 `Shell.Application` COM 服务器。
+- **两种形态同数量级**（D 65 vs 71 ms），与"绑定来源不改变可观察行为"一致；官方形态 A 档
+  那个 161 ms 是孤立尾延迟（杀软/调度），不是绑定差异。
+- **F 比 C 还慢**是这台机器上的真实代价：默认策略要把后台标签带出来，除等待之外还有 shell
+  多开重复标签的成本。不想付这笔就把策略设成 `overwrite`（不新增标签，代价是替换你正在看
+  的那个标签的内容）。
+- 跑之前确认没有别的进程在动资源管理器：有一次后台留着被中断的探针，C 档出现了 15 s 的
+  尾延迟，清掉之后三遍都不再现。
+
+复跑：`REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture`。
+一次运行新开 4 个夹具标签（C 的四个目录，D/E/F 复用它们；实测 13→17、17→21），结束只关
+**整帧都属于夹具**的窗口——与你自己的标签共用一帧的那些不关，一起关会把你的页带走。
 
 ## 手动验证步骤（真实弹窗与选中）
 
