@@ -398,4 +398,9 @@ shell 丢掉的那一次选中补回来。
   `tmp/` 是手动验证第 2 步在项目内造的中文+逗号+空格夹具。
 - `Cargo.lock` **入库**：这个项目最终交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2`
   的精确解析结果才谈得上"官方形态可复现"。
+- **发布前校验已过**：`cargo publish --dry-run` 打包 18 个文件、162.7 KiB（压缩 52.5 KiB），
+  并在隔离目录里重新编译校验；最后一行 `warning: aborting upload due to dry run` 是它的正常收尾，
+  不代表失败。包里没有 `target/`、`rust_sources/`、`tmp/`（cargo 按 VCS 忽略规则取文件），
+  调研脚本 `download-rust-repos.ps1` 会一起打进去——只是给后人取对比源码用，不影响被依赖。
+  `v0.1.0` 是**本地附注标签**：推送、以及真正 `cargo publish`（需要 crates.io token）都留给人来做。
 
