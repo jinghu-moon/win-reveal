@@ -22,27 +22,32 @@ win-reveal = "0.1"                    # 库用法：win_reveal::run / Revealer /
 
 | 形态 | 命令 | shell 绑定 | 产物（每次构建后复制留档） |
 |:--|:--|:--|:--|
-| 零依赖（默认） | `cargo build --release` | `extern "system"` 自声明 7 个函数，只链接 `shell32`/`ole32` | `reveal-native.exe`，293,376 B |
-| 官方绑定 | `cargo build --release --features official-bindings` | 同名包装，转调 `windows` crate 0.62.2 | `reveal-official.exe`，293,888 B |
+| 零依赖（默认） | `cargo build --release` | `extern "system"` 自声明 7 个函数，只链接 `shell32`/`ole32` | `reveal-native.exe`，297,472 B |
+| 官方绑定 | `cargo build --release --features official-bindings` | 同名包装，转调 `windows` crate 0.62.2 | `reveal-official.exe`，298,496 B |
 
 feature 不叫 `windows`：在一个整体仅 Windows 的 crate 上，`--features windows` 读起来像
 "默认构建还不支持 Windows"，而它真正说的是"绑定换成微软生成的那套"。
 
 默认形态的 `cargo tree` 里没有任何 normal 依赖（`windows` 只出现在 `[dev-dependencies]`，
 用于测试期的交叉校验）。官方形态同样不引入运行时第三方代码：调的还是那两个系统 DLL，
-只是绑定由微软生成，产物大 512 B、编译期多出 `windows-core` 等 crate。被本项目依赖时按
+只是绑定由微软生成，产物大 1,024 B、编译期多出 `windows-core` 等 crate。被本项目依赖时按
 需要选一种即可，两者的可观察行为与退出码完全一致。
 
 ## 退出码
 
 | 码 | 含义 |
 |:--|:--|
-| 0 | 已成功把"打开目录并选中"请求交给 shell |
+| 0 | 已成功把"打开目录并选中"请求交给 shell；`--help`/`-h` 也走这一档 |
 | 1 | shell 调用本身失败（stderr 给出失败的 Win32 步骤与 HRESULT） |
-| 2 | 输入错误：参数个数 ≠ 1、空参数、路径不存在、路径无父目录、`REVEAL_TAB_POLICY` 取值不认识（stderr 给出原因 + usage） |
+| 2 | 输入错误：参数个数 ≠ 1、空参数、路径不存在、路径无父目录、两个配置项的取值不认识（stderr 给出原因 + usage） |
 
-`REVEAL_DRY_RUN=1` 时不触碰 shell，只在 stdout 打印 `would reveal: <解析后的绝对路径>`，
-用于端到端测试与排查；正常调用不需要它。
+`reveal.exe --help`（或 `-h`，只认作**第一个**参数）把用法、两个配置项与退出码打到 stdout 后
+退出 0；`--helpme` 之类的写法仍按路径处理，`reveal.exe 那个文件 --help` 则是"参数个数 2"。
+
+`REVEAL_DRY_RUN` 取 `1`/`true`/`yes`（不区分大小写）时不触碰 shell，只在 stdout 打印
+`would reveal: <解析后的绝对路径>`，用于端到端测试与排查；`0`/`false`/`no`/空值表示关——
+一个只能被打开、关不掉的开关，在被 export 进 shell 会话之后就是事故源。其它写法直接退出 2，
+不静默按默认走。
 
 ## 配置项：目标目录已在后台标签时怎么办
 
@@ -180,13 +185,14 @@ shell 丢掉的那一次选中补回来。
 
 ## 测试
 
-- 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；
-  二进制内 `REVEAL_DRY_RUN=1` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
-- `src/lib.rs` 单元测试 19 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
+- 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；二进制的
+  `REVEAL_DRY_RUN=1|true|yes` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
+- `src/lib.rs` 单元测试 22 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
   目录输入、尾分隔符、`..`、盘根拒绝、shell 失败映射为退出码 1、`REVEAL_TAB_POLICY` 默认值/
-  大小写/非法值，以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、`\\?\UNC\` 还原成 UNC、
-  盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；外加 `src/automation.rs` 中路径匹配
-  与标题可见性（前缀边界、中文、空名）6 个纯函数测试。
+  大小写/非法值、`REVEAL_DRY_RUN` 的开/关/非法三档映射、每条 usage 错误以 `USAGE` 常量收尾
+  （`--help` 里嵌的是同一个常量），以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、
+  `\\?\UNC\` 还原成 UNC、盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；外加
+  `src/automation.rs` 中路径匹配与标题可见性（前缀边界、中文、空名）6 个纯函数测试。
 - `src/crosscheck.rs` 2 个交叉校验（只在 `cargo test` 编译，二进制不依赖它；只解析
   PIDL，**绝不调用** `SHOpenFolderAndSelectItems`，因此不开窗口）：
   ① 同一个 `\\?\…` 路径，官方 `Shell::SHParseDisplayName` 与我们的声明返回**同一个**
@@ -197,8 +203,11 @@ shell 丢掉的那一次选中补回来。
   交叉校验始终走 `ffi::native`（不是当前形态选中的那套），否则 `--features official-bindings` 下两边
   变成同一份代码，断言就成了自证。实测还留下一条 PIDL 常识：**同一路径两次解析的字节并不相同**
   （文件夹 item id 内嵌 shell 会刷新的时间戳），所以比较只能在同一块内存上做。
-- `tests/cli.rs` 12 个：真实二进制的退出码与 stderr 文案（全部在触达 shell 之前失败，含非法
-  标签策略），以及 dry-run 下的精确路径回显。
+- `tests/cli.rs` 19 个：真实二进制的退出码与 stderr 文案（全部在触达 shell 之前失败，或只失败在
+  读取标签策略那一步），`--help`/`-h` 走 stdout + 退出 0 且与错误路径共用同一行 usage，
+  `--helpme` 与出现在第二个位置的 `--help` 仍按普通参数处理，`REVEAL_DRY_RUN` 的 `0|false|NO|空` 确实关到了
+  "会去读标签策略"的程度而 `1|true|YES` 确实跳过了整个 shell 分支，以及 dry-run 下的精确路径回显。
+  每个用例都先 `env_remove` 掉两个配置项，避免跑 cargo 的那个 shell 里残留的变量改变观察结果。
 - `tests/ui_reveal.rs` 1 个 `#[ignore]` opt-in 测试，`REVEAL_UI_TEST=1` 时真实弹窗，三段断言：
   ① 退出码 0 **且** UIA 读到 `IsSelected=True` **且**没有以该文件名为标题的 `Edit`（没进重命名态）；
   ② 同目录第二次 reveal，断言视图数 ≥1 且不变（视图数断言前先校验非 0，否则"没多开窗口"会因为
@@ -208,8 +217,8 @@ shell 丢掉的那一次选中补回来。
   该测试会在当前资源管理器窗口里留下标签（shell 会把新目录并入已有窗口），跑完请手动 `Ctrl+W`。
 
 基线：仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（包名 `win-reveal`、feature `official-bindings` 之后，两种形态各跑一遍，结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 39 passed, 0 failed, 1 ignored；
+最近一次全量复验（`--help` 与 `REVEAL_DRY_RUN` 取值校验之后，两种形态各跑一遍，结果相同）：
+`cargo test` 与 `cargo test --features official-bindings` → 49 passed, 0 failed, 1 ignored；
 `cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
 `REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 1 passed。
 
@@ -244,8 +253,16 @@ shell 丢掉的那一次选中补回来。
 6. 配置项负例：`$env:REVEAL_TAB_POLICY='sideways'` 后 reveal → 退出码 2，
    stderr 提示 `REVEAL_TAB_POLICY must be 'newtab' or 'overwrite', got 'sideways'`；
    改回 `newtab`/`overwrite` 或不设该变量即恢复正常。
-7. 其它负例：`reveal.exe`（2，usage）、`reveal.exe a b`（2）、`reveal.exe ""`（2）、
-   `reveal.exe C:\nope.txt`（2，stderr 含该路径）。
+   同理 `$env:REVEAL_DRY_RUN='maybe'` → 退出码 2，stderr 提示
+   `REVEAL_DRY_RUN must be '1'/'0', 'true'/'false' or 'yes'/'no', got 'maybe'`；
+   此时 `reveal.exe --help` 仍然返回 0——读说明书不该先要求一个正确的配置值。
+7. 其它负例与自检：`reveal.exe`（2，usage）、`reveal.exe a b`（2）、`reveal.exe ""`（2）、
+   `reveal.exe C:\nope.txt`（2，stderr 含该路径）；
+   `reveal.exe --help` 与 `reveal.exe -h` → 0，整段用法在 **stdout**、stderr 为空；
+   `reveal.exe --helpme` → 2 且按"路径不存在"处理，`reveal.exe 目标文件 --help` → 2 且按
+   "参数个数 2"处理（help 只认第一个参数）。
+   `$env:REVEAL_DRY_RUN='0'`（或 `false`/`no`/空串）等于没设：再跑第 4 步就是真实弹窗，
+   而不是 `would reveal:`。
 8. 若第 4 步只打开目录而未高亮：说明补偿没能在 Shell COM 的窗口列表里匹配到该视图
    （例如该 shell 不暴露 `FolderView`）。判别法：对同一窗口用 PowerShell 的 Shell COM
    `FolderView.SelectItem` 手动选中——若手动可见高亮而本工具没有，则补偿路径在该 shell 上失效，
@@ -255,18 +272,19 @@ shell 丢掉的那一次选中补回来。
    常被削掉一个反斜杠，所以用 `[char]92` 拼出来再传，别直接打字符串：
 
    ```powershell
-   $env:REVEAL_DRY_RUN = '1'; $b = [char]92
+   $b = [char]92; $env:REVEAL_DRY_RUN = '1'
    & '.\target\release\reveal.exe' ($b+$b+'?'+$b+'C:\Windows\notepad.exe'); "exit=$LASTEXITCODE"
    # would reveal: C:\Windows\notepad.exe          exit=0
    & '.\target\release\reveal.exe' ($b+$b+'?'+$b+'UNC\fileserver\share\a.txt'); "exit=$LASTEXITCODE"
    # reveal: path does not exist: \\fileserver\share\a.txt   exit=2   ← 报的是还原后的名字
-   $env:REVEAL_DRY_RUN = $null
    & '.\target\release\reveal.exe' 'C:Windows\notepad.exe'; "exit=$LASTEXITCODE"
    # would reveal: C:\Windows\notepad.exe          exit=0   ← 盘相对已锚到盘根
+   $env:REVEAL_DRY_RUN = '0'
    ```
 
    第 2 条在没有该共享时才会走到"不存在"；若 `\\fileserver\share\a.txt` 在你机上真实存在，
-   它会以 `exit=0` 打印该 UNC 路径，同样是预期结果。
+   它会以 `exit=0` 打印该 UNC 路径，同样是预期结果。整段都开着 dry-run，所以**一个窗口都不会开**；
+   最后一行把开关设回 `'0'`（`$null` 是删除变量，同样算关），要看真实弹窗就在此后再跑一次第 3 步。
 
 ## 许可与仓库内容
 

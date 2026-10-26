@@ -42,6 +42,15 @@ const COINIT_APARTMENTTHREADED: u32 = 0x2;
 /// user is not looking at. Accepted values: `newtab` (default) and `overwrite`.
 const TAB_POLICY_VAR: &str = "REVEAL_TAB_POLICY";
 
+/// Setting that swaps the shell call for a print of the resolved path, so the whole CLI can
+/// be exercised without opening an Explorer window. Accepted values are listed in
+/// [`dry_run_setting`]; the name is public because the binary reads it.
+pub const DRY_RUN_VAR: &str = "REVEAL_DRY_RUN";
+
+/// The one-line usage. Shared by the error path in [`run`] and the `--help` text, so the two
+/// cannot drift apart.
+pub const USAGE: &str = "usage: reveal <file-or-folder-path>";
+
 /// Everything that can go wrong between the command line and the shell.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -55,8 +64,13 @@ pub enum Error {
     NotFound(PathBuf),
     /// The path is a drive root or otherwise has no containing folder to open.
     NoParent(PathBuf),
-    /// The tab policy setting holds a value this tool does not understand.
-    BadSetting { variable: &'static str, value: OsString },
+    /// A setting holds a value this tool does not understand.
+    BadSetting {
+        variable: &'static str,
+        value: OsString,
+        /// The accepted spellings, quoted for someone who just typed the wrong one.
+        allowed: &'static str,
+    },
     /// A Win32 shell call returned a failure HRESULT.
     Shell { step: &'static str, hresult: u32 },
 }
@@ -71,9 +85,9 @@ impl fmt::Display for Error {
             Error::EmptyArgument => write!(f, "file path argument is empty"),
             Error::NotFound(p) => write!(f, "path does not exist: {}", p.display()),
             Error::NoParent(p) => write!(f, "path has no containing folder: {}", p.display()),
-            Error::BadSetting { variable, value } => write!(
+            Error::BadSetting { variable, value, allowed } => write!(
                 f,
-                "{variable} must be 'newtab' or 'overwrite', got '{}'",
+                "{variable} must be {allowed}, got '{}'",
                 value.to_string_lossy()
             ),
             Error::Shell { step, hresult } => {
@@ -148,6 +162,25 @@ fn tab_policy(raw: Option<OsString>) -> Result<Switch, Error> {
         _ => Err(Error::BadSetting {
             variable: TAB_POLICY_VAR,
             value,
+            allowed: "'newtab' or 'overwrite'",
+        }),
+    }
+}
+
+/// Reads the dry-run setting out of an environment variable value.
+///
+/// Split out from the binary so the mapping is testable without process env. Unset means off;
+/// `0`, `false`, `no` and the empty string also mean off, because a value that only ever turns
+/// a switch on is a footgun once it is exported into a shell session.
+pub fn dry_run_setting(raw: Option<OsString>) -> Result<bool, Error> {
+    let Some(value) = raw else { return Ok(false) };
+    match value.to_string_lossy().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        _ => Err(Error::BadSetting {
+            variable: DRY_RUN_VAR,
+            value,
+            allowed: "'1'/'0', 'true'/'false' or 'yes'/'no'",
         }),
     }
 }
@@ -326,7 +359,7 @@ pub fn run(
             };
             let _ = writeln!(stderr, "reveal: {e}");
             if code == EXIT_USAGE {
-                let _ = writeln!(stderr, "usage: reveal <file-or-folder-path>");
+                let _ = writeln!(stderr, "{USAGE}");
             }
             code
         }
@@ -624,5 +657,50 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("REVEAL_TAB_POLICY must be 'newtab' or 'overwrite'"), "{message}");
         assert!(message.contains("sideways"), "{message}");
+    }
+
+    #[test]
+    fn dry_run_is_off_unless_a_value_says_otherwise() {
+        // An exported variable that can only ever turn itself on is the footgun: a session that
+        // set it once can never make a real reveal again. So the off spellings are load-bearing.
+        for off in [None, Some(""), Some("0"), Some("false"), Some("NO"), Some("False")] {
+            assert!(!dry_run_setting(off.map(OsString::from)).unwrap(), "{off:?}");
+        }
+        for on in [Some("1"), Some("true"), Some("YES"), Some("True")] {
+            assert!(dry_run_setting(on.map(OsString::from)).unwrap(), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn dry_run_rejects_a_value_that_means_neither_side() {
+        // Not even a silent default: the whole point of the variable is that what it prints is
+        // what the shell would have done.
+        let error = dry_run_setting(Some(OsString::from("maybe"))).unwrap_err();
+        assert_eq!(
+            error,
+            Error::BadSetting {
+                variable: DRY_RUN_VAR,
+                value: OsString::from("maybe"),
+                allowed: "'1'/'0', 'true'/'false' or 'yes'/'no'",
+            }
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("REVEAL_DRY_RUN must be '1'/'0', 'true'/'false' or 'yes'/'no', got 'maybe'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn every_usage_error_ends_with_the_usage_constant() {
+        // --help quotes USAGE too, so this is what keeps the two texts pointing at one line.
+        let dir = temp_dir("usage");
+        let rec = RecordingRevealer::default();
+        for args in [&[] as &[&str], &["a.txt", "b.txt"], &[""]] {
+            let (code, err) = run_with(args, &dir, &rec);
+            assert_eq!(code, EXIT_USAGE, "{args:?}");
+            assert_eq!(err.lines().last(), Some(USAGE), "{args:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
