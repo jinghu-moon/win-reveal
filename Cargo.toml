@@ -3,7 +3,8 @@ name = "win-reveal"
 version = "0.1.0"
 edition = "2021"
 description = "Windows-only: open a file's containing folder in Explorer and select the item"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/jinghu-moon/win-reveal"
 keywords = ["windows", "explorer", "reveal", "select", "shell"]
 categories = ["os::windows-apis"]
 

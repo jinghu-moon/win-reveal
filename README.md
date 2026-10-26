@@ -270,9 +270,10 @@ shell 丢掉的那一次选中补回来。
 
 ## 许可与仓库内容
 
-- **许可**：MIT 或 Apache-2.0 双许可，全文见 [LICENSE-MIT](LICENSE-MIT) 与
-  [LICENSE-APACHE](LICENSE-APACHE)，与 `Cargo.toml` 的 `license = "MIT OR Apache-2.0"` 一致。
-  双许可是 Rust 生态惯例：Apache-2.0 附带显式的专利授权条款，MIT 则最短。
+- **许可**：MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，与 `Cargo.toml` 的 `license = "MIT"` 一致；
+  版权抬头 `Copyright (c) 2026 seeyuer`。选它而不是双许可：这个项目只有一个 exe 和一段 FFI 声明，
+  没有需要专利条款来保护的实现细节，最短的许可证就够用。
+- **仓库**：<https://github.com/jinghu-moon/win-reveal>
 - **不入库的三样东西**（[.gitignore](.gitignore) 里各带一条为什么）：
   `target/` 是 497 MB 可再生产物；`rust_sources/` 是调研用的**第三方源码**，把它提交进一个可发布
   的仓库等于由我们来承担再分发义务——来源记在 `download-rust-repos.ps1`（它抓 GitHub 上的
