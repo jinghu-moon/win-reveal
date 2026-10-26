@@ -1,0 +1,30 @@
+[package]
+name = "win-reveal"
+version = "0.1.0"
+edition = "2021"
+description = "Windows-only: open a file's containing folder in Explorer and select the item"
+license = "MIT OR Apache-2.0"
+keywords = ["windows", "explorer", "reveal", "select", "shell"]
+categories = ["os::windows-apis"]
+
+# The command is `reveal`, not `win-reveal`: it is what a person types at a prompt, and the
+# crate name carries the platform qualifier the binary cannot.
+[[bin]]
+name = "reveal"
+path = "src/main.rs"
+
+[features]
+default = []
+# Build the shell entry points through the official `windows` crate instead of this crate's
+# own declarations. Same algorithm, same behaviour; see src/ffi.rs. Named for the binding's
+# source, because on a Windows-only crate `--features windows` would read as "adds Windows".
+official-bindings = ["dep:windows"]
+
+[dependencies]
+windows = { version = "0.62.2", optional = true, features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+
+[dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+
+[workspace]
+
