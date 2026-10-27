@@ -185,5 +185,5 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 
 发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、176.8 KiB（压缩 57.9 KiB）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
-`v0.1.0` 目前是**本地附注标签**，且停在两次提交之前——真要发布前先决定标签挪到哪棵树。
-推送 `main` 与标签、以及真正的 `cargo publish`（需要 crates.io token）都还没执行。
+`v0.1.0` 是**本地附注标签**，已打在要发布的这棵树（HEAD）上。剩下的推送 `main` 与标签、以及真正的
+`cargo publish`（需要 crates.io token）都是人手上的动作，尚未执行。
