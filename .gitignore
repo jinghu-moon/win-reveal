@@ -7,3 +7,7 @@
 
 # 手动验证夹具：README「手动验证步骤」第 2 步在项目内造的中文+逗号+空格路径
 /tmp
+
+# spec-workflow 工具在本项目根生成的脚手架（模板与空的 specs/approvals 目录），非本项目源码。
+# 不挡就会连带进 `cargo package`——cargo 会把未被忽略的未跟踪文件一起打进 crate。
+/.spec-workflow
