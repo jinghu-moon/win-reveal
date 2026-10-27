@@ -92,8 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | 项 | 位置 | 给宿主项目做什么 |
 |:--|:--|:--|
 | `trait Revealer` / `ShellRevealer` / `RecordingRevealer` | [src/lib.rs:130](src/lib.rs#L130) / [:147](src/lib.rs#L147) / [:315](src/lib.rs#L315) | 唯一的注入边界；recorder 让宿主自己的测试不必弹资源管理器 |
-| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:163](src/lib.rs#L163) | 同一条路，只是策略来自参数——不去动进程 env（`set_var` 在新 edition 里已是 unsafe，还会被子进程继承） |
-| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:572](src/automation.rs#L572)，由 [src/lib.rs:49](src/lib.rs#L49) 再导出 | 两个变体的文档写的是实测代价，不是字面含义 |
+| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:163](src/lib.rs#L163) | 与 `reveal()` 同一条路，只是策略来自参数。宿主要行为可预测就用它：`reveal()` 的策略来自进程环境变量 `REVEAL_TAB_POLICY`，那是个看不见的输入，而 `set_var` 在新 edition 里已是 unsafe、还会被子进程继承 |
+| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:572](src/automation.rs#L572)，由 [src/lib.rs:49](src/lib.rs#L49) 再导出 | 就是上面那张代价表的两列；`NewTab` 也是 `REVEAL_TAB_POLICY` 的默认值 |
 | `enum Error`（7 个变体） | [src/lib.rs:78](src/lib.rs#L78) | `NotFound` / `NoParent` / `BadSetting` / `Shell{step, hresult}` 可分派，`Display` 文案与 CLI 一致 |
 | `resolve(raw, cwd)` | [src/lib.rs:384](src/lib.rs#L384) | 只做形态归一＋绝对化＋存在性与父目录检查，完全不碰 shell |
 | `run(args, cwd, revealer, stderr) -> i32` | [src/lib.rs:432](src/lib.rs#L432) | 整套 CLI 语义，但 cwd、stderr、实现都是参数，可嵌进 GUI 或自己的命令行 |
@@ -175,5 +175,5 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 
 发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、174.2 KiB（压缩 57.0 KiB）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
-`v0.1.0` 目前是**本地附注标签**，`main` 已推送；推送标签与真正的 `cargo publish`（需要 crates.io
-token）尚未执行。
+`v0.1.0` 目前是**本地附注标签**，且停在两次提交之前——真要发布前先决定标签挪到哪棵树。
+推送 `main` 与标签、以及真正的 `cargo publish`（需要 crates.io token）都还没执行。
