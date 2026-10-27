@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 测试
 
 ```powershell
-cargo test                                        # 52 passed / 0 failed / 3 ignored + 3 doctests
+cargo test                                        # 54 passed / 0 failed / 3 ignored + 3 doctests
 cargo test --features official-bindings           # 同一基线
 cargo clippy --all-targets                        # 零警告
 REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗断言高亮
@@ -171,9 +171,12 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 仓库 <https://github.com/jinghu-moon/win-reveal>。`[package] authors` 同样署 `seeyuer`，
 不放邮箱——这行字会原样出现在 crates.io 上并被索引。
 
-`.gitignore` 排除三样东西，各带一条理由：`target/`（497 MB 可再生产物）、
+`.gitignore` 排除四样东西，各带一条理由：`target/`（497 MB 可再生产物）、
 `rust_sources/`（调研用的**第三方源码**，提交进可发布的仓库等于由我们承担再分发义务；来源记在
-`download-rust-repos.ps1`）、`tmp/`（人工验证的中文+逗号+空格夹具）。
+`download-rust-repos.ps1`）、`tmp/`（人工验证的中文+逗号+空格夹具）、`.spec-workflow/`
+（外部工具在项目根生成的脚手架）。最后一条是发布前才补的：`cargo package` 会把**未被忽略的未跟踪
+文件**一起打进 crate，所以漏掉它等于把无关工具的模板发到 crates.io——它现在被挡住，dry-run 的
+23 文件清单里不再有它。
 `Cargo.lock` **入库**：交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2` 的精确解析结果才谈得上
 "官方形态可复现"。`download-rust-repos.ps1` 入库但用 `[package] exclude` 挡在 crate 外：
 打包环境里没有 `rust_sources/` 可写，那个脚本进 crate 就是一件不能用的东西。
@@ -183,7 +186,7 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 `compile_error!`，那个站点的构建机上编译不过，所以**不要把 docs.rs 链接当"文档在这里"用**——
 读 README 与 `docs/`。
 
-发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、176.8 KiB（压缩 57.9 KiB）并在隔离目录里
+发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、181.8 KiB（压缩 59.8 KiB）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
 `v0.1.0` 是**本地附注标签**，已打在要发布的这棵树（HEAD）上。剩下的推送 `main` 与标签、以及真正的
 `cargo publish`（需要 crates.io token）都是人手上的动作，尚未执行。
