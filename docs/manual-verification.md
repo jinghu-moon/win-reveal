@@ -1,67 +1,113 @@
-# 手动验证步骤（真实弹窗与选中）
+# 人工验证指南
 
-自动测试里唯一断言"用户看得见高亮"的手段是真弹窗，所以留一份人工复核清单。
+本指南用于在 Windows 桌面上验证真实 Explorer 行为，包括目标高亮、标签策略和路径处理。该验证会打开 Explorer 窗口或标签。只在可以操作当前桌面的会话中执行。
 
-以下命令在 PowerShell 里用 `& 'path' 'arg'; "exit=$LASTEXITCODE"` 取退出码；
-`… & echo exit=%ERRORLEVEL%` 会被 PowerShell 解析成后台 Job，取不到退出码。
+## 前置条件
 
-1. `cargo build --release`（零依赖形态，产物即 `target\release\reveal.exe`）；
-   换成官方绑定形态用 `cargo build --release --features official-bindings`，下面每一步对两者结果相同。
-   想同时留下两份可对比的文件，构建后各自复制一份（`reveal-native.exe` / `reveal-official.exe`）。
-2. 新建夹具（放项目内的 `tmp\`，免得 `C:\` 根需要提权）。**直接在控制台粘贴，别存成 `.ps1`**：
-   PowerShell 5.1 读无 BOM 的脚本会按 ANSI 解码，中文目录名会变味。
+- Windows 11 桌面会话，PowerShell 5.1 或更高版本。
+- Rust 工具链满足项目 MSRV：Rust 1.88 或更高。
+- 仓库已检出，且可运行 Cargo。
+
+## 构建
+
+默认手写 FFI 形态：
+
+```powershell
+cargo build --release
+$exe = (Resolve-Path .\target\release\reveal.exe).Path
+```
+
+官方绑定形态可单独验证：
+
+```powershell
+cargo build --release --features official-bindings
+$exe = (Resolve-Path .\target\release\reveal.exe).Path
+```
+
+两次构建会覆盖同一路径的 exe。若要分别保留产物，请在每次构建后复制并改名。
+
+## 基本 reveal
+
+在仓库根目录创建包含空格、中文和逗号的夹具：
+
+```powershell
+$dir = Join-Path (Get-Location) 'tmp\reveal-check\子 目录, x'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$file = Join-Path $dir '目标 文件.txt'
+Set-Content -LiteralPath $file -Value 'test'
+& $exe $file
+$LASTEXITCODE
+```
+
+预期退出码为 `0`，Explorer 打开 `子 目录, x`，并高亮 `目标 文件.txt`。目标应处于选中状态，不应进入重命名编辑状态；窗口应恢复并置前。成功时 stderr 应为空。
+
+## 标签行为
+
+使用同一夹具依次检查以下状态：
+
+1. 目标目录没有打开：执行 reveal 后应打开该目录并选中目标。
+2. 目标目录处于当前可见标签：应复用该视图并选中目标。
+3. 目标目录处于后台标签，未设置策略：默认 `newtab` 应保留原可见标签并将目标带到前台；可能为目标目录新增重复标签。
+4. 再次建立后台目标目录，并设置覆盖策略：
 
    ```powershell
-   mkdir 'tmp\reveal-check\子 目录, x' -Force
-   Set-Content -LiteralPath 'tmp\reveal-check\子 目录, x\目标 文件.txt' -Value 'x'
-   $p = (Resolve-Path -LiteralPath 'tmp\reveal-check\子 目录, x\目标 文件.txt').Path
+   $env:REVEAL_TAB_POLICY = 'overwrite'
+   & $exe $file
+   $LASTEXITCODE
+   Remove-Item Env:\REVEAL_TAB_POLICY
    ```
 
-3. 运行：`& '.\target\release\reveal.exe' $p; "exit=$LASTEXITCODE"`
-4. 预期：`exit=0`；资源管理器打开 `子 目录, x` 且 `目标 文件.txt` **高亮选中而非进入重命名**；
-   窗口被置前（原先最小化也会恢复）；stderr 无输出。命令返回时高亮应已生效（补偿最多等待 3 秒）。
-   若该目录已在**当前可见标签**中打开，则不会新增标签也不会导航。
-5. 四种起始状态逐一验证（默认 `newtab`）：
-   - 资源管理器完全关闭 → 出现新窗口/新标签，目标高亮，窗口在前台。
-   - 资源管理器开着、目标目录未在任何标签 → 新增该目录的标签并选中。
-   - 目标目录就是**当前标签** → 只选中并置前，不新增标签、不刷新。
-   - 目标目录在**后台标签** → 你正在看的标签保留，目标标签被带到前台并选中；
-     实测这一条会为该目录**多出一个标签**。不想多标签就设
-     `$env:REVEAL_TAB_POLICY='overwrite'`（改为覆盖当前标签，标签数不增长）。
-6. 配置项负例：`$env:REVEAL_TAB_POLICY='sideways'` 后 reveal → 退出码 2，
-   stderr 提示 `REVEAL_TAB_POLICY must be 'newtab' or 'overwrite', got 'sideways'`；
-   改回 `newtab`/`overwrite` 或不设该变量即恢复正常。
-   同理 `$env:REVEAL_DRY_RUN='maybe'` → 退出码 2，stderr 提示
-   `REVEAL_DRY_RUN must be '1'/'0', 'true'/'false' or 'yes'/'no', got 'maybe'`；
-   此时 `reveal.exe --help` 仍然返回 0——读说明书不该先要求一个正确的配置值。
-7. 其它负例与自检：`reveal.exe`（2，usage）、`reveal.exe a b`（2）、`reveal.exe ""`（2）、
-   `reveal.exe C:\nope.txt`（2，stderr 含该路径）；
-   `reveal.exe --help` 与 `reveal.exe -h` → 0，整段用法在 **stdout**、stderr 为空；
-   `reveal.exe --helpme` → 2 且按"路径不存在"处理，`reveal.exe 目标文件 --help` → 2 且按
-   "参数个数 2"处理（help 只认第一个参数）。
-   `$env:REVEAL_DRY_RUN='0'`（或 `false`/`no`/空串）等于没设：再跑第 4 步就是真实弹窗，
-   而不是 `would reveal:`。
-8. 若第 4 步只打开目录而未高亮：说明补偿没能在 Shell COM 的窗口列表里匹配到该视图
-   （例如该 shell 不暴露 `FolderView`）。判别法：对同一窗口用 PowerShell 的 Shell COM
-   `FolderView.SelectItem` 手动选中——若手动可见高亮而本工具没有，则补偿路径在该 shell 上失效，
-   请记录 Windows 版本；若手动也不高亮，则是本机 shell 缺陷（build 26100 上
-   `SHOpenFolderAndSelectItems` 与 `explorer /select,` 单独使用时即如此，本工具靠补偿绕开）。
-9. 路径形态归一化（用 dry-run，**不开窗口**）。必须改写的约束列在
-   [how-it-works.md](how-it-works.md) 的"路径形态归一化"一节。
-   注意 `\\?\` 这种串经 git-bash/PowerShell 传参常被削掉一个反斜杠，所以用 `[char]92` 拼出来再传，
-   别直接打字符串：
+   当前可见标签应导航到目标目录，标签总数不增加。此行为会替换当前标签原本显示的目录。
 
-   ```powershell
-   $b = [char]92; $env:REVEAL_DRY_RUN = '1'
-   & '.\target\release\reveal.exe' ($b+$b+'?'+$b+'C:\Windows\notepad.exe'); "exit=$LASTEXITCODE"
-   # would reveal: C:\Windows\notepad.exe          exit=0
-   & '.\target\release\reveal.exe' ($b+$b+'?'+$b+'UNC\fileserver\share\a.txt'); "exit=$LASTEXITCODE"
-   # reveal: path does not exist: \\fileserver\share\a.txt   exit=2   ← 报的是还原后的名字
-   & '.\target\release\reveal.exe' 'C:Windows\notepad.exe'; "exit=$LASTEXITCODE"
-   # would reveal: C:\Windows\notepad.exe          exit=0   ← 盘相对已锚到盘根
-   $env:REVEAL_DRY_RUN = '0'
-   ```
+## CLI 错误与帮助
 
-   第 2 条在没有该共享时才会走到"不存在"；若 `\\fileserver\share\a.txt` 在你机上真实存在，
-   它会以 `exit=0` 打印该 UNC 路径，同样是预期结果。整段都开着 dry-run，所以**一个窗口都不会开**；
-   最后一行把开关设回 `'0'`（`$null` 是删除变量，同样算关），要看真实弹窗就在此后再跑一次第 3 步。
+```powershell
+& $exe --help
+$LASTEXITCODE
+& $exe
+$LASTEXITCODE
+& $exe 'C:\path\that\does-not-exist'
+$LASTEXITCODE
+```
+
+帮助应退出 `0`，内容写入 stdout。缺参数、多个路径参数、空参数、不存在的路径和无父目录的盘根应退出 `2` 并将原因写入 stderr。shell HRESULT 错误使用退出码 `1`；稳定构造这类系统错误较困难，因此主要由错误映射的单元测试覆盖。
+
+配置解析也可验证：将 `REVEAL_TAB_POLICY` 设为未支持值，或将 `REVEAL_DRY_RUN` 设为未支持值，应退出 `2` 并报告变量名。`--help` 会先于配置解析执行，因此错误配置不会阻止读取帮助。
+
+## Dry-run 路径检查
+
+dry-run 不调用 shell，可用于检查路径解析和归一化：
+
+```powershell
+$env:REVEAL_DRY_RUN = '1'
+& $exe $file
+$LASTEXITCODE
+Remove-Item Env:\REVEAL_DRY_RUN
+```
+
+stdout 应包含 `would reveal: <绝对路径>`，退出码为 `0`。要检查 verbatim 路径，可以用反斜杠字符拼接，避免 shell 或终端对连续反斜杠的处理差异：
+
+```powershell
+$b = [char]92
+$verbatim = $b + $b + '?' + $b + 'C:\Windows\notepad.exe'
+$env:REVEAL_DRY_RUN = '1'
+& $exe $verbatim
+Remove-Item Env:\REVEAL_DRY_RUN
+```
+
+存在的 `\\?\C:\...` 路径应回显为普通盘路径。盘相对路径（例如 `C:Windows\notepad.exe`）按盘根锚定。不存在的路径仍会退出 `2`。
+
+## 未出现高亮时的诊断
+
+如果 Explorer 打开了目录但目标未高亮：
+
+1. 记录 Windows 版本和 build，并检查是否只有目标目录打开、没有其他 UI 错误。
+2. 通过 PowerShell Shell COM 对该视图调用 `FolderView.SelectItem` 作为阳性对照。
+3. 若阳性对照可以选中，说明该 shell 的视图枚举或匹配路径与本工具补偿逻辑不兼容。
+4. 若阳性对照也不能选中，则当前 Explorer/shell 环境没有按预期执行选择。
+
+build 26100 上曾观察到单独调用 `SHOpenFolderAndSelectItems` 会打开目录但丢弃新视图的选择请求；该结果不代表其他 Windows 版本的行为。
+
+## 清理
+
+验证完成后检查 Explorer 中是否还有夹具目录标签，手动关闭这些标签，并删除仓库下 `tmp\reveal-check`。测试不会关闭与用户目录标签共用同一个窗口的 Explorer frame。

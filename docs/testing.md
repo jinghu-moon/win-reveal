@@ -1,129 +1,69 @@
-# 测试
+# 测试说明
 
-## 怎么跑
+## 常规验证
 
 ```powershell
-cargo test                                          # 默认形态：54 passed / 3 ignored / 3 doctests
-cargo test --features official-bindings             # 官方绑定形态：同一基线
-cargo clippy --all-targets                          # 零警告（含 --features official-bindings）
-cargo +1.88.0 check --all-targets                   # MSRV 实测
-REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored --nocapture   # 真弹窗，会开标签
-REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真弹窗，测时延
+cargo test
+cargo test --features official-bindings
+cargo clippy --all-targets
+cargo clippy --all-targets --features official-bindings
+cargo doc --no-deps
+cargo doc --no-deps --features official-bindings
+cargo +1.88.0 check --all-targets
+cargo +1.88.0 check --all-targets --features official-bindings
+cargo +1.88.0 test --doc
 ```
 
-## 不弹窗的端到端
+当前两种绑定形态均为 35 个库单元测试、19 个 CLI 集成测试、3 个 doctest 通过；3 个涉及真实 Explorer 或时延测量的测试默认忽略。
 
-- 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；二进制的
-  `REVEAL_DRY_RUN=1|true|yes` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
-- `src/tests.rs` 单元测试 25 个（crate 根的子模块，`src/lib.rs` 只留 `#[cfg(test)] mod tests;`——
-  子模块看得见根模块的私有项，搬到 `tests/` 就得为了可测而放宽公开面）：参数个数/空参/缺失、
-  相对路径按 cwd 解析、空格+中文、逗号+`&`、
-  目录输入、尾分隔符、`..`、盘根拒绝、shell 失败映射为退出码 1、`REVEAL_TAB_POLICY` 默认值/
-  大小写/非法值、`REVEAL_DRY_RUN` 的开/关/非法三档映射、每条 usage 错误以 `USAGE` 常量收尾
-  （`--help` 里嵌的是同一个常量）、`Error` 确实实现了 `std::error::Error`（否则宿主项目的 `?`
-  编译不过，而这没有别处守着），以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、
-  `\\?\UNC\` 还原成 UNC、盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；加上库宿主专属的
-  两条——本线程已被宿主按 MTA 初始化时 `init_apartment` 必须回报"套间不是我们的"而不是失败
-  （`RPC_E_CHANGED_MODE` 是负 HRESULT，COM 却照常可用；这条真的调 `CoInitializeEx`，但不碰
-  shell，所以不开窗），以及两个 revealer 都满足 `Send + Sync + Revealer`（recorder 里换成
-  `RefCell` 就让宿主的 `Arc<dyn Revealer + Send + Sync>` 编译不过）；外加
-  `src/automation.rs` 中路径匹配与标题可见性（前缀边界、中文、空名）6 个纯函数测试。
-- doctest 3 条（`cargo test --doc`）：crate 级与 `reveal_with` 两条标 `no_run`——它们调用真实
-  shell，编译校验足够，执行就会在开发机上弹资源管理器窗口；`run` 一条用 `RecordingRevealer`
-  真跑，断言退出码、记录到的路径与写进 `stderr` 缓冲的文案。README 里教的那行
-  `[dependencies]` 因此有守卫。
-- `tests/cli.rs` 19 个：真实二进制的退出码与 stderr 文案（全部在触达 shell 之前失败，或只失败在
-  读取标签策略那一步），`--help`/`-h` 走 stdout + 退出 0 且与错误路径共用同一行 usage，
-  `--helpme` 与出现在第二个位置的 `--help` 仍按普通参数处理，`REVEAL_DRY_RUN` 的 `0|false|NO|空` 确实关到了
-  "会去读标签策略"的程度而 `1|true|YES` 确实跳过了整个 shell 分支，以及 dry-run 下的精确路径回显。
-  每个用例都先 `env_remove` 掉两个配置项，避免跑 cargo 的那个 shell 里残留的变量改变观察结果。
+## 不操作桌面的测试
 
-## 交叉校验（`src/crosscheck.rs`）
+`Revealer` 是 CLI 与 shell 之间的注入边界。单元测试使用 `RecordingRevealer`；真实 CLI 集成测试通过 `REVEAL_DRY_RUN` 验证路径解析与输出，不弹资源管理器。
 
-4 个，只在 `cargo test` 编译，二进制不依赖它；调的都是**不会创建窗口**的参数与错误路径
-（`SHOpenFolderAndSelectItems` 只喂空 folder + 空数组——实测 build 26100 在开窗前就返回
-`E_INVALIDARG`，调用前后 `Shell.Windows` 的**条目逐条比对**无变化），因此不开窗口：
+`src/tests.rs` 包含库内部测试。它作为 `src/lib.rs` 的子模块编译，可以访问私有实现而不扩大公开 API。测试覆盖参数校验、路径解析和归一化、错误映射、配置解析、COM apartment 所有权，以及实现的 `Send + Sync` 属性。`src/automation.rs` 的纯逻辑测试覆盖路径与 Explorer 标题匹配。
 
-1. 同一个 `\\?\…` 路径，官方 `Shell::SHParseDisplayName` 与我们的声明返回**同一个**
-   `0x80070057`，改写后两边都 `S_OK` → 归一化补的是 API 的约束，不是我们自己声明的错。
-2. 官方解析出一个 PIDL 后 `ILClone` 一份，用**我们的** `ILFindLastID`/`ILRemoveLastID`/`ILFree`
-   操作它，再用官方 `ILIsParent(ours, full, true|false)` 断言截留的正是直接父级，并比较子项字节
-   → 拆分算法与官方 helper 一致，且 `ILFree` 与官方共用同一个分配器。
-3. 空 folder + 空数组：两套绑定都返回 `0x80070057` → 把 reveal 真正调用的那个四参数签名
-   （`pidl_folder, cidl, apidl, dw_flags`）在两套声明边界上钉住。**它钉不住的是我们自己的包装**：
-   这一条直接调 `Shell::`，`ffi::official` 里的切片重建被绕开了（这是此前文档写强的一处，已收窄）。
-4. `ILFree(空 PIDL)`：两套绑定都当 no-op 不崩 → 解析失败时我们的代码照样把空 PIDL 交给 `ILFree`，
-   这是活路径。
+`tests/cli.rs` 启动真实二进制，检查退出码、标准输出/错误和环境变量行为。测试会清除继承的 `REVEAL_*` 设置，避免运行环境改变结果。
 
-**第 5 条曾经存在，现在被删掉了**，记录在这儿是为了别让人再补一遍：它用空 folder + 单元素真 PIDL
-数组，目的就是走一遍官方包装里的 `Some(slice::from_raw_parts(apidl, cidl))`（上面 4 条都绕开它）。
-它不能待在默认套件：同一台机器同一天，PowerShell 探针量到 `S_OK` / 0.06 s，Rust 测试二进制两次复现
-都是 `E_ABORT`（`0x8000_4004`）/ **40.7 s**。空 folder 配上非空数组时 shell 做的是真活，返回值和耗时
-都不由我们决定，"保证不开窗"更无从谈起。那条重建的覆盖来源只能是 `--features official-bindings` 下
-`--ignored` 的真 Explorer 用例——只有那里才有真 folder。探针另留下一条有用的事实：shell **先解引用
-`apidl` 再校验 folder**，塞假指针 `0x1234` 直接把探针进程打成段错误，所以伪造 PIDL 不能当夹具
-（后果是崩进程，不是返回错误码）。
+## FFI 交叉校验
 
-交叉校验始终走 `ffi::native`（不是当前形态选中的那套），否则 `--features official-bindings` 下两边
-变成同一份代码，断言就成了自证。实测还留下一条 PIDL 常识：**同一路径两次解析的
-字节并不相同**（文件夹 item id 内嵌 shell 会刷新的时间戳），所以比较只能在同一块内存上做。
+`src/crosscheck.rs` 在 `cargo test` 时编译，生产构建不包含它。它始终直接调用 `ffi::native` 并与 `windows` crate API 对照，即使测试启用了 `official-bindings`，避免两边实际调用同一实现。
 
-## 真弹窗测试（`tests/ui_reveal.rs`）
+当前 4 条交叉测试覆盖：
 
-2 个 `#[ignore]` opt-in 测试，`REVEAL_UI_TEST=1` 时真实弹窗。
+1. 官方 API 与手写声明对 verbatim 路径给出相同 HRESULT，归一化后的路径两边均可解析。
+2. 手写 `ILFindLastID` / `ILRemoveLastID` 对官方解析出的 PIDL 正确拆出父项和子项，且内存可由共享的 shell allocator 释放。
+3. `SHOpenFolderAndSelectItems` 对空 folder 和空数组在两边均返回 `E_INVALIDARG`。此参数组合已在目标系统验证不会打开 Explorer 窗口。它验证两个底层 API 的空参数路径，不覆盖 `ffi::official` 的非空数组包装分支。
+4. 两边的 `ILFree(NULL)` 都安全返回。
 
-第一个三段断言：
-① 退出码 0 **且** UIA 读到 `IsSelected=True` **且**没有以该文件名为标题的 `Edit`（没进重命名态）；
-② 同目录第二次 reveal，断言视图数 ≥1 且不变（视图数断言前先校验非 0，否则"没多开窗口"会因为
-查询本身失效而虚假通过）；③ 把承载夹具的窗口**最小化**后第三次 reveal，断言窗口不再最小化
-且文件高亮——这一步专门守着"窗口看不见时选中不可见"这一类回归。
+官方包装在 `apidl` 非空时会从原始指针构造 slice。尝试用空 folder 加真实 PIDL 进入该分支时，shell 会先读取 PIDL，再处理 folder；观察到测试进程执行耗时异常且结果不稳定，因此没有将其放入默认套件。该包装分支目前由官方绑定形态下的真实 Explorer 测试间接覆盖；默认 UI 测试忽略，故这不是每次 `cargo test` 都执行的契约测试。
 
-第二个守 `overwrite`：先用默认策略开两个夹具目录（target 在先、foreground 在后），断言标题栏上是
-foreground 而不是 target——本机若没把两者并进同一个窗口，就没有"可覆盖的可见标签"这回事，测试
-直接红而不是假装通过；再 `overwrite` reveal target 里的第二个文件，断言退出 0 + UIA 高亮 +
-无重命名态，且**总标签数不变**、target 标签 +1、foreground 标签 −1、标题栏换成 target 且不再是
-foreground。注意 UIA 那半边只证明"选中落在某个标签上"：26100 实测后台标签的 ListItem 同样留在
-UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看得见"只能靠标题栏前缀那条判断，
-也正是工具自己唯一的可见标签信号。
+## 真实 Explorer 测试
 
-两个测试共用一把进程内 `Mutex`：cargo 会在同一个测试二进制里并行跑它们，而它们读同一个桌面、
-同一个标签窗口的标题栏，并行会互相改掉对方的标题（首次真机跑就是这样废掉一条断言的）。
-收尾 `WM_CLOSE` 只关那些标签全部属于夹具的窗口（共用 HWND 的窗口里有用户自己的标签）。
-该测试会在当前资源管理器窗口里留下标签（shell 会把新目录并入已有窗口），跑完请手动 `Ctrl+W`。
+这些测试会创建临时目录、打开或移动 Explorer 标签，并可能在测试后留下标签。确认可以操作当前桌面后，串行运行：
 
-`tests/latency.rs` 是第三个 opt-in 入口，见 [latency.md](latency.md)。
+```powershell
+$env:REVEAL_UI_TEST = "1"
+cargo test --test ui_reveal -- --ignored --test-threads=1 --nocapture
+```
 
-## 基线
+`tests/ui_reveal.rs` 有两项测试：
 
-仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（2026-10-27，这一批做了两件事：把上一条"单元素真 PIDL 数组"的 crosscheck 测试
-**删掉**（它不可靠，理由见上节那条记录），以及把 `src/lib.rs` 尾部 345 行内联 `mod tests` 拆成
-兄弟文件 `src/tests.rs`）：`cargo test` 与 `cargo test --features official-bindings` → 54 passed,
-0 failed, 3 ignored，另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features
-official-bindings`）零警告；`cargo doc --no-deps` 两形态干净；`cargo +1.88.0 check --all-targets`
-与 `+1.88.0 test --doc` 通过（MSRV 实测）；两种形态的 release exe 仍是 **297,984 B**——拆的是
-`cfg(test)` 模块，产物理应一字节都没变，实测确认。
-真弹窗与时延本批**未**重跑：生产路径一行没改，而删除的那条腿恰恰是因为它会驱动 shell 做真活
-（40.7 s 且返回值不由我们决定）才离开的。上一批（绑定解耦）两形态各跑过 → 2 passed，`overwrite`
-一档仍实测到总标签数不变、target +1、foreground −1、标题栏换成目标目录；时延数字见
-[latency.md](latency.md)。
+- reveal 后通过 UI Automation 检查目标被选中、没有进入重命名编辑状态；复用同一目录时不增加视图，并验证最小化的窗口会恢复。
+- 在 `overwrite` 策略下检查目标选中、可见标签切换、总标签数不变，以及原前台目录标签被替换。
 
-拆分用机械手段做，避免手抄 345 行出错：`sed -n '511,852p' | sed 's/^    //'` 抽出去，再把结果
-重新缩进 4 格与原区间 `diff`——只有空行多出 4 个空格这一验证副作用，非空行逐字节一致，证明没有
-字符串字面量被 dedent 改动。区间边界靠 `grep -n "^mod tests"` 定位，收尾的 `}` 单独留在 lib.rs。
+UI Automation 中后台标签的条目也可能显示为 selected，因此测试还检查 Explorer 标题栏，以判断目标是否实际位于可见标签。测试会尽量清理只含夹具的窗口；与用户标签共用的窗口不会整体关闭。
 
-上一批（绑定解耦）的产物实测：门控 `native` 前后，两种形态的 release exe **都仍是 297,984 B**
-（哈希因注释导致的行号位移而变）→ 删掉的是官方形态里的死 extern 声明，链接器本就不码化它们，
-收益是意图与少编译一个模块，不是体积。
+## 时延测试
 
-更早一批（库宿主适配：`init_apartment` 三态、`RecordingRevealer` 换 `Mutex`、三段等待改退避）
-复验为 52 passed；
+`tests/latency.rs` 也会操作 Explorer。运行方式与数据见 [latency.md](latency.md)：
 
-同日发布元数据收口之后（`Cargo.toml` 加 `authors`/`readme`/`exclude`、新增 `CHANGELOG.md`），
-发布前校验：`cargo package --list` 打出的文件含 `CHANGELOG.md`、不含被 `[package] exclude`
-挡下的 `download-rust-repos.ps1`；`cargo publish --dry-run` 在隔离目录里重新编译通过
-（当前树上为 24 文件 / 184.0 KiB / 压缩 61.3 KiB；这个字节数随文本浮动，README 因此不再写它，
-以现测为准）。`.gitignore` 补了一条 `/.spec-workflow`——发现
-`cargo package` 会把未忽略的未跟踪文件（这里是某外部工具生成的 7 个模板）一并打进 crate，挡掉后
-清单回到干净的 23 个；拆出 `src/tests.rs` 之后是 24 个。非 Windows 目标的报错面用 `cargo check --target x86_64-linux-android` 量过：
-9 条错误，首条即 crate 里那句 `compile_error!`。
+```powershell
+$env:REVEAL_LATENCY_TEST = "1"
+cargo test --test latency -- --ignored --nocapture
+```
+
+## 最近验证记录
+
+2026-10-27 的当前源码复验：两种 feature 形态各自通过 35 个库测试、19 个 CLI 测试和 3 个 doctest；clippy 与文档构建通过。拆出 `src/tests.rs` 后，两种 release exe 仍为 297,984 B。当前 crate 包含 24 个文件，`cargo publish --dry-run` 在隔离目录重新编译成功。crate 字节数会随文档变化，不作为稳定基线。
+
+真实 Explorer 测试与时延测试未在最近一批测试文件整理和文档更新中重跑；生产路径未因测试文件搬迁而变化。上一次真实 Explorer 测试记录和时延样本应结合当前 Windows build 与桌面状态重新验证，不作为本次运行结果。

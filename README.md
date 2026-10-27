@@ -1,194 +1,159 @@
 # win-reveal
 
-在 Windows 资源管理器里打开一个文件（或目录）**所在的目录，并把它高亮选中**——不是只打开目录。
+`win-reveal` 是一个仅支持 Windows 的 Rust 工具和库。它在资源管理器中打开文件或目录所在的文件夹，并高亮选中目标。
 
 ```powershell
-reveal.exe "C:\some dir\文件.txt"
+reveal "C:\work\报告 2026\结果, final.txt"
 ```
 
-- 仅 Windows（非 Windows 目标直接 `compile_error!`），不做跨平台抽象。
-- 默认构建零第三方依赖：`cargo tree` 里没有 normal 依赖，只链接系统的 `shell32`/`ole32`。
-- 路径走 shell 命名空间（UTF-16 PIDL）而不是拼命令行，空格、中文、逗号、`&` 都不构成解析风险。
-- 结果是"选中"，不是"进入重命名框"；窗口最小化时也会恢复并置前。
-- 同一个 crate 也是库：错误类型实现了 `std::error::Error`，可直接落进调用方的 `?` 链路。
+路径通过 Windows shell 命名空间以 UTF-16 传递，不经过 `explorer.exe` 命令行拼接，因此空格、中文、逗号和 `&` 不需要额外转义。
 
 ## 安装
 
+从源码构建命令行程序：
+
 ```powershell
-cargo build --release                          # → target\release\reveal.exe
-cargo build --release --features official-bindings   # 换官方绑定形态，行为完全相同
+cargo build --release
 ```
 
-在 `Cargo.toml` 里被依赖。这个 crate 在非 Windows 目标直接 `compile_error!`（没有跨平台桩），
-所以跨平台宿主要把依赖挂在 cfg 下，否则在 Linux/macOS 上连 `cargo check` 都过不去——用
-`--target x86_64-linux-android` 实测：9 条错误，第一条是那句 `compile_error!`，其余来自
-`std::os::windows` 与 UTF-16 转换，属于"这里根本没有实现"的正常表现：
+生成的程序位于 `target\release\reveal.exe`。
+
+发布到 crates.io 后，作为库依赖时：
 
 ```toml
 [target.'cfg(windows)'.dependencies]
-win-reveal = "0.1"          # v0.1.0 还没发布到 crates.io；在那之前写成 path = "../win-reveal"
+win-reveal = "0.1"
 ```
 
-包名带 `win-` 限定（crates.io 上 `reveal` 已被一个图片查看器占用，`windows-*` 前缀实际属于微软
-windows-rs 家族），而**命令仍然是 `reveal`**：那是人要敲的东西，平台限定由包名承担。
+这个 crate 没有跨平台实现。跨平台宿主应使用 Windows 条件依赖，否则非 Windows 构建会被明确拒绝。
 
 ## 命令行
 
 ```text
-usage: reveal <file-or-folder-path>
+reveal <file-or-folder-path>
 ```
 
-恰好一个参数：路径不存在、无父目录（盘根）、参数个数不对、空参数都会退出 2 并在 stderr 给出原因。
-`--help` 或 `-h` **只认作第一个参数**，把用法、两个配置项与退出码打到 stdout 后退出 0；
-`--helpme` 仍按路径处理，`reveal.exe 那个文件 --help` 算"参数个数 2"。
+参数必须恰好是一个存在的文件或目录。相对路径按当前工作目录解析；盘根目录因没有可打开的父目录而被拒绝。
 
-| 退出码 | 含义 |
-|:--|:--|
-| 0 | 已成功把"打开目录并选中"的请求交给 shell（`--help` 也走这一档） |
-| 1 | shell 调用本身失败，stderr 给出失败的 Win32 步骤与 HRESULT |
-| 2 | 输入错误：参数个数/空参数/路径不存在/无父目录/配置项取值不认识 |
+```powershell
+reveal --help
+reveal -h
+```
 
-成功判据取 `SHOpenFolderAndSelectItems` 的 HRESULT，**不读 `explorer.exe` 的退出码**——本机实测
-它成功时也返回 1（[为什么这么选](docs/research.md)）。
+`--help` 和 `-h` 只有作为第一个参数时才表示帮助选项。
 
-### 配置项
+退出码：
 
-两个都用环境变量，取值不区分大小写；**写法不认识就退出 2**，不静默按默认走。
+| 代码 | 含义 |
+| ---: | --- |
+| `0` | 请求已成功交给 Windows shell；帮助也使用此代码 |
+| `1` | shell 调用失败，错误信息包含失败步骤和 HRESULT |
+| `2` | 参数、路径或环境变量配置无效 |
 
-| 变量 | 取值 | 作用 |
-|:--|:--|:--|
-| `REVEAL_TAB_POLICY` | `newtab`（默认）/ `overwrite` | 目标目录已开着但在你**没在看**的标签里时怎么办，见下 |
-| `REVEAL_DRY_RUN` | `1`/`true`/`yes` 开，`0`/`false`/`no`/空 关 | 完全不碰 shell，只在 stdout 打印 `would reveal: <绝对路径>`；端到端测试与排查用 |
+### 环境变量
 
-### 目标目录已经在后台标签里时
+`REVEAL_DRY_RUN` 可以在不打开资源管理器的情况下检查路径解析：
 
-这是唯一需要你决定的局面（其余两种起始状态下两个取值表现一致）：
+```powershell
+$env:REVEAL_DRY_RUN = "1"
+reveal ".\报告 2026\结果, final.txt"
+# would reveal: C:\...\报告 2026\结果, final.txt
+```
 
-| 起始状态 | `newtab`（默认） | `overwrite` |
-|:--|:--|:--|
-| 目标目录就是当前可见标签 | 只选中并置前 | 同左 |
-| 目标目录没在任何标签开过 | shell 开一个新标签并选中 | 同左 |
-| 目标目录在**后台标签** | 你正在看的标签不动，把目标标签带到前台并选中；实测代价是为该目录**多出一个标签**，重复 reveal 会累积 | 把你正在看的标签**导航**到目标目录：标签数不增长，代价是那个标签原来的内容被替换 |
+接受 `1`、`true`、`yes` 表示开启；`0`、`false`、`no` 或空值表示关闭。其他值会以退出码 `2` 拒绝。
 
-两种代价都由真机用例守着（[docs/testing.md](docs/testing.md)）。
-库宿主不必为了选策略去改**自己进程**的环境变量：`ShellRevealer::reveal_with(path, Switch::Overwrite)`
-把同一个选择作为参数接收。
+`REVEAL_TAB_POLICY` 控制目标目录已经存在于后台 Explorer 标签时的行为：
+
+| 值 | 行为 |
+| --- | --- |
+| `newtab` | 默认值。保留当前可见标签，把目标标签带到前台；可能产生一个重复标签 |
+| `overwrite` | 导航当前可见标签到目标目录；标签数量不增加，但当前标签内容会被替换 |
+
+取值不区分大小写。当前标签就是目标目录，或目标目录尚未打开时，两种策略行为相同：复用或打开目标目录并选中条目。
 
 ## 作为库使用
 
-```rust
-use win_reveal::{Revealer, ShellRevealer, Switch};
+```rust,no_run
+use win_reveal::{Revealer, ShellRevealer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let target = std::env::current_exe()?;      // 任何存在且有父目录的路径
-    ShellRevealer.reveal(&target)?;             // 标签策略来自 REVEAL_TAB_POLICY
-    ShellRevealer::reveal_with(&target, Switch::Overwrite)?;  // 或者当参数给
+    let target = std::env::current_exe()?;
+    ShellRevealer.reveal(&target)?;
     Ok(())
 }
 ```
 
-这段是编译过的：`src/lib.rs` 有 3 条 doctest，碰真实 shell 的两条标了 `no_run`（只编译，
-绝不替 `cargo test` 弹资源管理器）。公开面只有这些，其余（`automation`、`ffi`、`normalize`、
-标签切换的实现）都是模块私有的：
+如果不希望从进程环境读取标签策略，可以直接传入策略：
 
-| 项 | 位置 | 给宿主项目做什么 |
-|:--|:--|:--|
-| `trait Revealer` / `ShellRevealer` / `RecordingRevealer` | [src/lib.rs:130](src/lib.rs#L130) / [:147](src/lib.rs#L147) / [:315](src/lib.rs#L315) | 唯一的注入边界；recorder 让宿主自己的测试不必弹资源管理器 |
-| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:163](src/lib.rs#L163) | 与 `reveal()` 同一条路，只是策略来自参数。宿主要行为可预测就用它：`reveal()` 的策略来自进程环境变量 `REVEAL_TAB_POLICY`，那是个看不见的输入，而 `set_var` 在新 edition 里已是 unsafe、还会被子进程继承 |
-| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:572](src/automation.rs#L572)，由 [src/lib.rs:49](src/lib.rs#L49) 再导出 | 就是上面那张代价表的两列；`NewTab` 也是 `REVEAL_TAB_POLICY` 的默认值 |
-| `enum Error`（7 个变体） | [src/lib.rs:78](src/lib.rs#L78) | `NotFound` / `NoParent` / `BadSetting` / `Shell{step, hresult}` 可分派，`Display` 文案与 CLI 一致 |
-| `resolve(raw, cwd)` | [src/lib.rs:384](src/lib.rs#L384) | 只做形态归一＋绝对化＋存在性与父目录检查，完全不碰 shell |
-| `run(args, cwd, revealer, stderr) -> i32` | [src/lib.rs:432](src/lib.rs#L432) | 整套 CLI 语义，但 cwd、stderr、实现都是参数，可嵌进 GUI 或自己的命令行 |
-| `EXIT_OK`/`EXIT_SHELL`/`EXIT_USAGE`、`USAGE`、`DRY_RUN_VAR`、`dry_run_setting()` | [src/lib.rs:52-74](src/lib.rs#L52)、[:227](src/lib.rs#L227) | 包装 `run` 时不必抄数字；复用同一行 usage 与同一套取值规则 |
+```rust,no_run
+use win_reveal::{ShellRevealer, Switch};
 
-**库宿主还需要知道三件事**（都不必额外配置）：
-
-- **套间**：`reveal_with` 在调用线程上初始化 COM，但**沿用宿主已有的套间**——包括线程已经按
-  MTA 初始化的情况。那时 `CoInitializeEx` 返回 `RPC_E_CHANGED_MODE`（负 HRESULT，COM 却完全
-  可用），我们照常执行，并且**不会**替宿主 `CoUninitialize`；只有其它真正的失败才映射成
-  `Error::Shell`。
-- **阻塞**：等 shell 刷新用的是 `thread::sleep`，不泵消息。成功路径一般在几十毫秒内返回，
-  最坏 3 s 上限。GUI 宿主若不想让"在资源管理器中显示"卡住 UI 线程，把这个调用放到工作线程。
-- **线程**：`ShellRevealer` 与 `RecordingRevealer` 都满足 `Send + Sync`，可以放进
-  `Arc<dyn Revealer + Send + Sync>` 交给别的线程（recorder 内部是 `Mutex`，不是 `RefCell`）。
-
-**MSRV `1.88`**：这是实测过的最低工具链，本机装了 1.88.0，`cargo +1.88.0 check --all-targets`
-（两种形态）与 `cargo +1.88.0 test --doc` 都通过。更低的版本没装、没实测，就不写进元数据。
-
-## 两种构建形态，同一套算法
-
-差别只在 shell 绑定的来源（见 [src/ffi.rs](src/ffi.rs)）：
-
-| 形态 | 命令 | shell 绑定 | 产物（本次构建实测） |
-|:--|:--|:--|:--|
-| 零依赖（默认） | `cargo build --release` | `extern "system"` 自声明 7 个函数 | `reveal.exe` 297,984 B（留档名 `reveal-native.exe`） |
-| 官方绑定 | `cargo build --release --features official-bindings` | 同名包装，转调 `windows` 0.62.2 | 297,984 B（`reveal-official.exe`） |
-
-官方形态同样不引入运行时第三方代码：调的还是那两个系统 DLL，只是绑定由微软生成，编译期多出
-`windows-core` 等 crate。这一档字节差不是恒定的：早先测到官方形态大 1,024 B，这次两者同为
-297,984 B（哈希不同，确认是两份不同产物），所以它只是链接布局的偶然，不是形态的固有代价。
-两者的可观察行为、退出码与时延同一量级，按需要选一种即可。feature 不叫 `windows`：在一个整体
-仅 Windows 的 crate 上，`--features windows` 读起来像"默认构建还不支持 Windows"。
-
-## 测试
-
-```powershell
-cargo test                                        # 54 passed / 0 failed / 3 ignored + 3 doctests
-cargo test --features official-bindings           # 同一基线
-cargo clippy --all-targets                        # 零警告
-REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗断言高亮
+let target = std::env::current_exe()?;
+ShellRevealer::reveal_with(&target, Switch::Overwrite)?;
 ```
 
-默认测试**不会弹出资源管理器**：`Revealer` 是可注入边界，二进制侧用 `REVEAL_DRY_RUN=1` 走打印型
-实现。各测试目标守什么、以及那 3 个 `#[ignore]` 真弹窗用例的断言与环境代价，见
-[docs/testing.md](docs/testing.md)。
+主要公开 API：
 
-## 表现预期
+| API | 用途 |
+| --- | --- |
+| `Revealer` | shell 实现与测试替身之间的注入边界 |
+| `ShellRevealer` | 通过 Windows Explorer 执行 reveal |
+| `ShellRevealer::reveal_with` | 显式传入 `Switch`，不读取标签策略环境变量 |
+| `RecordingRevealer` | 记录请求，供宿主测试使用，不打开窗口 |
+| `Switch` | `NewTab` 或 `Overwrite` |
+| `Error` | 路径、配置和 Win32 shell 错误，支持 `std::error::Error` |
+| `resolve` | 按指定工作目录解析、归一化并验证路径 |
+| `run` | 复用完整 CLI 语义，同时注入参数、revealer 和错误输出 |
 
-- **时延**：地板约 18 ms；在你正看着的文件夹里换选一个文件约 50–60 ms；目标目录没开过约 0.9 s、
-  条目刚写入约 0.4–1.2 s、后台标签配默认策略约 1.1–1.3 s。秒级那部分花在**等 shell**（有墙钟
-  上限的退避轮询），不花在调用上；它随你打开的标签数线性增长。两种形态同数量级，数据与测法见
-  [docs/latency.md](docs/latency.md)。
-- **只打开目录、没有高亮**：多半是该 shell 不暴露 `FolderView`，或本机 shell 缺陷。判别方法与
-  两种结果分别意味着什么见 [docs/manual-verification.md](docs/manual-verification.md) 第 8 步。
-- **路径形态**：`\\?\C:\…`、`\\?\UNC\…`、盘相对 `C:a.txt` 会被归一化，设备命名空间形态原样交给
-  shell。为什么必须改写：[docs/how-it-works.md](docs/how-it-works.md)。
+`ShellRevealer` 会在调用线程使用 COM，并沿用宿主已经建立的 COM 套间。调用会等待 Explorer 刷新，通常几十毫秒完成，冷路径或后台标签场景可能需要约一秒。视图查找和打开后的补选分别最多等待 2 秒和 3 秒；少见的连续等待情况下总阻塞时间可能接近 5 秒。GUI 程序应在工作线程调用它。
 
-## 深入阅读
+`RecordingRevealer` 和 `ShellRevealer` 都满足 `Send + Sync`。库调用仍要求目标路径存在且有父目录。
 
-| 文档 | 内容 |
-|:--|:--|
-| [docs/how-it-works.md](docs/how-it-works.md) | 选型的第一性原理、PIDL 拆分、FFI 面、标签页四个实测事实、`SVSI_EDIT` 重命名坑、手写 IDispatch/BSTR 的约束 |
-| [docs/research.md](docs/research.md) | 五个同类项目的源码对比（带 file:line）与本机 build 26100 的实测清单 |
-| [docs/testing.md](docs/testing.md) | 每个测试目标守住什么、交叉校验、真弹窗测试的序列化与残留、最近一次基线 |
-| [docs/latency.md](docs/latency.md) | A–F 六档时延数据与读法 |
-| [docs/manual-verification.md](docs/manual-verification.md) | 9 步人工复核清单（真实弹窗与选中） |
-| [CHANGELOG.md](CHANGELOG.md) | 0.1.0 的公开面清单、已知限制，以及 0.x 的版本策略 |
+## 构建形态
 
-## 许可与仓库内容
+默认构建使用手写 Win32 FFI，不引入第三方运行依赖：
 
-MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 seeyuer`；
-仓库 <https://github.com/jinghu-moon/win-reveal>。`[package] authors` 同样署 `seeyuer`，
-不放邮箱——这行字会原样出现在 crates.io 上并被索引。
+```powershell
+cargo build --release
+```
 
-`.gitignore` 排除四样东西，各带一条理由：`target/`（497 MB 可再生产物）、
-`rust_sources/`（调研用的**第三方源码**，提交进可发布的仓库等于由我们承担再分发义务；来源记在
-`download-rust-repos.ps1`）、`tmp/`（人工验证的中文+逗号+空格夹具）、`.spec-workflow/`
-（外部工具在项目根生成的脚手架）。最后一条是发布前才补的：`cargo package` 会把**未被忽略的未跟踪
-文件**一起打进 crate，所以漏掉它等于把无关工具的模板发到 crates.io——它现在被挡住，`cargo package
---list` 的清单里没有它（文件数与体积都现测，别信文档里的静态数字）。
-`Cargo.lock` **入库**：交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2` 的精确解析结果才谈得上
-"官方形态可复现"。`download-rust-repos.ps1` 入库但用 `[package] exclude` 挡在 crate 外：
-打包环境里没有 `rust_sources/` 可写，那个脚本进 crate 就是一件不能用的东西。
+如果宿主已经使用微软的 `windows` crate，可以选择官方绑定：
 
-分类取自 crates.io 的分类表并已核实：`os::windows-apis`（库）+ `command-line-utilities`（`reveal`
-这个二进制）。文档站在本地是 `cargo doc --no-deps`；docs.rs 那侧因为 crate 在非 Windows 目标
-`compile_error!`，那个站点的构建机上编译不过，所以**不要把 docs.rs 链接当"文档在这里"用**——
-读 README 与 `docs/`。
+```powershell
+cargo build --release --features official-bindings
+```
 
-发布前校验已过：`cargo publish --dry-run` 打包 24 个文件（不含 `.spec-workflow/` 这类工具脚手架，
-字节数记在 [docs/testing.md](docs/testing.md)，它会随文档文本浮动）并在隔离目录里
-重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
-远端在不在同步状态用 `git log origin/main..main` 现查——这句话每次提交都会变，所以不写死。
-`v0.1.0` 是**本地附注标签**，指向要发布的那棵树且尚未推远端；推它、以及真正的 `cargo publish`
-（需要 crates.io token）还是人手上的动作。
+两种形态共享同一套路径处理、PIDL、Explorer 标签和错误逻辑；feature 只替换 7 个 shell/COM 入口的绑定来源。两者都调用 Windows 系统 DLL，官方绑定不会改变运行时行为。
+
+## 测试与验证
+
+常规测试不打开资源管理器：
+
+```powershell
+cargo test
+cargo test --features official-bindings
+cargo clippy --all-targets
+cargo doc --no-deps
+```
+
+真实 Explorer 测试需要显式启用，会创建和切换标签：
+
+```powershell
+$env:REVEAL_UI_TEST = "1"
+cargo test --test ui_reveal -- --ignored --test-threads=1 --nocapture
+```
+
+完整测试边界、时延数据和人工复核步骤见 [docs/testing.md](docs/testing.md)、[docs/latency.md](docs/latency.md) 和 [docs/manual-verification.md](docs/manual-verification.md)。实现选择见 [docs/how-it-works.md](docs/how-it-works.md)，调研记录见 [docs/research.md](docs/research.md)。
+
+## 已知限制
+
+- 仅支持 Windows；非 Windows 目标会在编译时明确失败。
+- Windows shell 在新建窗口或后台标签场景可能丢弃原始选中请求。项目会通过 Explorer 的文件夹视图补选并置前；如果当前 shell 不暴露该视图，结果可能退化为只打开目录。
+- `newtab` 和 `overwrite` 是明确的行为取舍：前者保留用户当前标签但可能增加重复标签，后者不增加标签但会替换当前标签内容。
+- 真实 Explorer 测试和时延测试依赖当前桌面状态，默认不会运行。
+
+## 版本与许可
+
+当前版本为 `0.1.0`。0.x 期间，公开 API、`reveal` 命令、`official-bindings` feature 和 `REVEAL_*` 环境变量均视为公开接口；破坏性变化会提升次版本号。
+
+项目采用 MIT 许可，详见 [LICENSE-MIT](LICENSE-MIT)。变更记录见 [CHANGELOG.md](CHANGELOG.md)。

@@ -1,39 +1,45 @@
-# 调研与实测结论
+# 调研与平台实测
 
-回答两件事：**别人怎么做的**，以及**这台 Windows 11 24H2 上什么是真的**。
-本地源码：`rust_sources/{showfile,win-desktop-utils,ublx}`；
-`martensite-share-platform` 与 `win_open` 本地缺失，已从 crates.io 下载 `.crate` 并解压到
-`rust_sources/{martensite-share-platform,win-open}`（版本 0.22.0 / 0.1.2）。
-取源脚本见 `download-rust-repos.ps1`。
+本文记录实现选型和 Windows 11 24H2 build 26100 上的观察。Explorer 是异步、状态化的系统组件，其他 Windows 版本或 shell 配置可能表现不同；本机测量不是跨版本保证。
 
-## 现有实现的对比
+## 选型
 
-| 项目 | 底层实现（源码位置） | 错误模型 | 依赖 / unsafe | 结论 |
-|:--|:--|:--|:--|:--|
-| showfile | `SHParseDisplayName` + `SHOpenFolderAndSelectItems(idlist, None, 0)`，`src/lib.rs:160-169`；verbatim 前缀剥离 `src/lib.rs:140-158` | **返回 `()`，无错误通道**；COM 初始化失败直接 panic（`src/lib.rs:136`） | `windows 0.52`；有 unsafe；跨平台 cfg + `rustbus/zbus/gio` feature 门与 `compile_error!`（`src/lib.rs:36-41`） | 语义最接近，但无错误通道，无法满足"清晰错误 + 非零退出码"；它的 verbatim 前缀处理是本项目唯一采纳的做法，并补上了 `\\?\UNC\` 与盘相对（`C:a.txt`）两种它没覆盖的形态 |
-| win-desktop-utils | `Command::new("explorer.exe").arg("/select,").arg(path)` **两个 token**，`src/shell.rs:352-355` | 有类型化 `Result`（`src/error.rs`） | `windows 0.62` 6 组 API、7 个 feature 模块（`Cargo.toml:34-50,143-153`） | 双 token 形态本机实测**不选中**；为 1 个函数引入整库不划算 |
-| ublx | `canonicalize()` 后 `format!("/select,{p}")`，`src/modules/opener.rs:97-99` | `io::Result` | TUI 应用（rusqlite/ratatui 等），非库 | `canonicalize` 产生 `\\?\` verbatim 前缀再拼命令行，属已知坑；不可作为依赖 |
-| martensite-share-platform | `explorer /select,{}` 单 token + `.status()`，`src/windows.rs:47-57`；文档明确"explorer 退出码不可靠，成功也常为 1"（`src/windows.rs:6-9`） | `ShareReply` 枚举 | 无 unsafe；但包在 `ShareBackend` 共享抽象里 | 结论正确（退出码不可信），但抽象面大于需求；`.status()` 会阻塞 |
-| win-open | 默认走 `cmd/pwsh/nu start`（**只打开不选中**）；`shellexecute` feature 下 `SHOpenFolderAndSelectItems(folder, Some(&[folder]), 0)`，`src/lib.rs:417-422` | 自定义 `Error` | 默认零依赖；有 unsafe | 把目录自身 PIDL 当作待选中子项传给 API，语义错误且 `ILFree` 泄漏；文件走 `ShellExecuteExW`＝打开文件而非选中；`detect_shell` 会 spawn pwsh/nu 探测并可能 panic（`src/lib.rs:259-266`） |
+需求是“打开父文件夹并选中条目”，不是打开文件。比较过的路径如下：
 
-## 本机实测
+| 方式 | 观察 | 结论 |
+| --- | --- | --- |
+| `explorer.exe /select,<path>` | 属于未文档化命令行约定；单 token、双 token 在本机均未选中，成功时进程退出码也可能为 1 | 不用于主调用 |
+| `SHOpenFolderAndSelectItems` | 文档化的打开并选中入口，返回 HRESULT；路径经 PIDL 而非命令行传入 | 主调用 |
+| `FolderView.SelectItem` | 对已存在的文件夹视图可补做选择；对后台标签的选择不代表用户可见 | Explorer 自动化补偿 |
+| `explorer.exe <folder>` | 可将已存在的后台目录带到前台，但本机可能新建重复标签 | 仅用于 `newtab` 标签策略 |
+| `Navigate2` | 可将当前可见标签导航到目标文件夹，不增加标签总数 | 用于 `overwrite` 策略 |
 
-Windows 11 24H2，build 26100。判定手段：UI Automation 的 `SelectionItem.IsSelected`，
-并以 Shell COM `FolderView.SelectItem` 作阳性对照验证判定器有效。
+调用 `SHOpenFolderAndSelectItems` 时，完整 PIDL 被分成父 PIDL 和最后一个子 PIDL。用系统命令拼接路径会引入引号、空格和逗号解析差异，因此不作为主要接口。
 
-- `explorer.exe` 成功时也返回退出码 1 → 退出码不可用于成功判定（与 martensite 文档一致）。
-- `explorer /select,` 单 token 与双 token 两种形态：目录打开、**均不选中**。
-- `SHOpenFolderAndSelectItems`（两种形态）返回 `S_OK`、目录打开；新建窗口时选中被该 shell 丢弃。
-- 直接引用真实 `showfile` crate（`windows` crate 的正确绑定）结果相同 → 排除自写 P/Invoke 的问题，
-  确认是**本机 shell 的环境性缺陷**（新建窗口时丢弃选中请求），而非实现选型问题。
-- 阳性对照：对**已打开**的视图用 Shell COM `FolderView.SelectItem` 可稳定产生高亮 →
-  缺陷只发生在"新建窗口"这一条路径上，因此本工具的补偿走同一条路；
-  补偿加入后，opt-in 测试在**新建窗口**场景下断言 `IsSelected=True` 通过。
-- 后台标签的 ListItem **同样留在 UIA 树里**（两个同目录标签都报 `IsSelected=True`），
-  所以 UIA 只能证明"选中落在某个标签上"，证明不了"用户看得见"；可见性判定只能靠标题栏前缀。
-- `Navigate2` 打在**当前可见标签**上（`overwrite` 策略）实测：总标签数不变、目标目录 +1 个标签、
-  原先在看的标签 −1 个、标题栏换成目标目录、条目高亮且没有进入重命名态。
+## 对照实现
 
-因此本工具的成功判据取"shell 调用返回成功 HRESULT"（OS 契约内唯一可验证信号），
-而"选中高亮"由补偿逻辑负责，并被 opt-in 真实弹窗测试断言（见 [testing.md](testing.md)）。
-这些事实如何决定 `src/automation.rs` 的形状，见 [how-it-works.md](how-it-works.md)。
+调研过 `showfile`、`win-desktop-utils`、`ublx`、`martensite-share-platform` 和 `win-open`：
+
+- `showfile` 使用相近的 Shell API，但错误反馈不足；其 verbatim path 处理提供了本项目路径归一化的参考。
+- `win-desktop-utils` 提供较完整的 Windows 工具库，但为单个 reveal 操作引入的 API 和依赖面较大。
+- `ublx` 与 `martensite-share-platform` 使用 Explorer 命令行；后者关于 Explorer 退出码不可靠的判断与本机观测一致。
+- `win-open` 的默认行为是打开文件/目录，不等同于在目录中选中目标；其可选 shell 路径与本需求语义不同。
+
+调研用第三方源码曾放在 `rust_sources/`，该目录被 `.gitignore` 排除，不随仓库提交或 crate 打包。来源与获取脚本为 `download-rust-repos.ps1`。
+
+## build 26100 观测
+
+- `explorer.exe` 即使成功打开目标，也可能退出码为 1，因此不能用其退出码判断成功。
+- `/select,` 单 token 和分开的双 token 在本机均打开目录但未选中条目。
+- `SHOpenFolderAndSelectItems` 返回 `S_OK`，但新建视图时 shell 丢弃了原始选择；对已打开视图使用 `FolderView.SelectItem` 可产生高亮。
+- 后台标签仍能通过 Shell COM 访问；UI Automation 也可能把后台标签条目标记为 selected，所以仅凭 `IsSelected` 无法判断用户是否看见它。
+- 标题栏显示当前可见标签的名称，因此实现用标题栏与 Shell COM 记录联合推断可见标签。
+- `Navigate2` 导航当前可见标签时，实测总标签数不变，目标目录标签数加一，原前台目录标签数减一。
+- `\?\` verbatim 路径形式在常规文件存在性检查后仍可能被 `SHParseDisplayName` 以 `E_INVALIDARG` 拒绝；普通盘路径和 UNC 路径可解析。
+- 将 `SVSI_EDIT` 与 `SVSI_SELECT` 混用会进入重命名态；实现只使用选择、取消其他选择、确保可见和焦点标志。
+
+## 证据边界
+
+这些结果来自一台 Windows 11 24H2 build 26100 机器及相应 UI Automation / Shell COM 探针。它们用于解释实现和测试设计，不保证所有 Windows 版本、语言包、Explorer 设置或替代 shell 都有相同行为。遇到只打开目录但没有高亮时，按 [manual-verification.md](manual-verification.md) 的第 8 节区分补偿未匹配与 shell 本身不支持。
+
+测试如何验证两种 FFI 形态，以及哪些行为需真实 Explorer，见 [testing.md](testing.md)。

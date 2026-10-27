@@ -1,108 +1,53 @@
 # 实现原理
 
-本文记录 `win-reveal` 的选型依据与 build 26100 上的实测约束。总览见 [../README.md](../README.md)。
+本文对应当前实现。项目的目标是打开一个路径的父文件夹并选中该条目；它不是打开文件本身。
 
-## 第一性原理 + 奥卡姆剃刀
+## 调用路径
 
-不可再还原的事实只有三条：
+CLI 在 [src/main.rs](../src/main.rs) 读取参数和环境变量，然后调用库中的 `run`。`run` 负责参数个数、路径验证、错误文本和退出码；shell 通过 `Revealer` trait 注入。测试可以用 `RecordingRevealer` 替代真实 Explorer。
 
-1. Windows 上"打开目录并选中条目"的**文档化**入口只有一个：`SHOpenFolderAndSelectItems`，
-   它返回 HRESULT，因此失败是可判定的。
-2. `explorer.exe /select,<path>` 是未文档化的命令行约定，其退出码无意义（本机实测成功也返回 1），
-   且路径要经过一次命令行拼接，空格/逗号/引号都是真实的解析风险。
-3. 路径一旦走 shell 命名空间（UTF-16 PIDL），就完全不经过命令行，转义问题从根源上消失。
+生产路径在 [src/lib.rs](../src/lib.rs)：解析并归一化输入、初始化或采用当前线程 COM apartment，再查找已打开的 Explorer 视图。视图查找和标签操作在 [src/automation.rs](../src/automation.rs)，Win32 声明和官方绑定选择在 [src/ffi.rs](../src/ffi.rs)。
 
-由这三条直接推出：调用 `SHOpenFolderAndSelectItems`，路径以 UTF-16 传入，用 HRESULT 决定退出码。
-其余一切（CLI 框架、跨平台层、canonicalize、命令行拼接）都是不必要的实体，全部不引入。
-唯一保留的一次输入改写是路径形态归一化——它不是抽象层，而是下面那条实测约束的直接结果。
+## 路径与 PIDL
 
-## 路径形态归一化（`normalize`，[src/lib.rs:343](../src/lib.rs#L343)）
+路径按 UTF-16 交给 `SHParseDisplayName`，不构造 `explorer.exe /select,...` 命令行。解析得到完整 PIDL 后，`ILFindLastID` 取最后一个子项，`ILRemoveLastID` 将父 PIDL 截短，随后传给 `SHOpenFolderAndSelectItems`。内存通过 shell 的 `ILFree` 释放。
 
-`resolve` 在把路径交给 shell 命名空间之前改写三种写法，全部是 build 26100 上的实测结论：
+`resolve` 根据调用者的工作目录绝对化相对路径，检查存在性和父目录。进入 shell namespace 前，`normalize` 处理三类 Windows 路径：
 
-| 输入 | shell 命名空间的反应 | 归一化为 |
-|:--|:--|:--|
-| `\\?\C:\a.txt` | `File::Exists` 为真，但 `SHParseDisplayName` 返回 `E_INVALIDARG`（`0x80070057`） | `C:\a.txt` |
-| `\\?\UNC\server\share\a.txt` | 同上 | `\\server\share\a.txt` |
-| `C:a.txt`（盘符后无 `\`） | 合法 Win32 相对路径，但基准是**资源管理器进程自己**记住的"该盘当前目录"，与调用方 cwd 无关 | `C:\a.txt` |
-| `\\?\Device\Harddisk0\Partition1`、`\\.\GLOBAL\RPC` | 设备命名空间形态没有 shell 对应物 | **原样交给 shell**，让它用自己的 HRESULT 说话 |
-| `C:\a.txt`、`\\server\share\a.txt`、`rel\a.txt` | 本来就正确/已由 cwd 解析 | 不动 |
+| 输入 | 处理 | 原因 |
+| --- | --- | --- |
+| `\\?\C:\...` | 去掉 verbatim 前缀 | 本机 `SHParseDisplayName` 拒绝该形式 |
+| `\\?\UNC\server\share\...` | 还原为普通 UNC 形式 | shell parser 对 verbatim UNC 同样有限制 |
+| `C:relative` | 以 `C:\` 为基准锚定 | Explorer 的盘相对当前目录与调用者进程 cwd 不同 |
 
-前两类若不改写，工具会对一个刚验证过存在的路径报 shell 失败；第三类若不改写，同一个参数
-在不同时刻会指向不同文件（而且 `cwd.join("C:a.txt")` 会把它当相对路径直接拼接，得到一个
-`...\cwd\C:a.txt` 这种不存在的东西）。这条正是从 `showfile` 的 `src/lib.rs:140-158` 学到的处理，
-`\\?\` 与 `\\?\UNC\` 两种形态由官方 `windows` 绑定在同一进程里交叉验证过（见
-[testing.md](testing.md)），确认拒绝来自 API 而不是我们的声明。
+普通绝对路径、普通 UNC 路径和已由 cwd 解析的相对路径不做额外重写。设备命名空间形式不保证可被 shell 表示，会原样交由 shell 并按 HRESULT 报告结果。
 
-FFI 层声明 7 个函数（`shell32` 的 `SHParseDisplayName`/`SHOpenFolderAndSelectItems`/
-`ILFindLastID`/`ILRemoveLastID`/`ILFree` 加 `ole32` 的 `CoInitializeEx`/`CoUninitialize`）；
-`unsafe` 集中在 `src/ffi/`（声明或包装）、`reveal_parsed`（一次调用）与 `src/automation.rs`
-（IDispatch 客户端），`resolve`/`run` 这些业务路径是 safe 的。PIDL 拆分采用文档化的
-*parent PIDL + child 数组* 形态（`ILFindLastID` + `ILRemoveLastID`），而非 `cidl=0/apidl=NULL`
-的未文档化形态。
+## Explorer 视图与标签
 
-唯一保留的命令行使用是 `newtab` 策略下的那一次 `explorer.exe <目录>`：本机 shell 里它是唯一能把
-已有后台标签带到前台的手段。它只把目录路径作为**一个参数**交给 `std::process::Command`（拼接与
-转义由 OS 负责），不带 `/select,` 前缀——那个前缀既不选中又会把路径按逗号重新解析，选中仍由
-`FolderView.SelectItem` 完成。它的退出码照例不读（本机实测成功也返回 1）。
+算法先尝试当前已打开的 Explorer 视图：
 
-## 选中、标签页与置前（`src/automation.rs`）
+1. 通过 `Shell.Application.Windows` 找到父目录匹配的 `FolderView`，在其项目中定位目标条目并调用 `FolderView.SelectItem`。
+2. 若目录存在于后台标签，按 `Switch` 策略处理：`NewTab` 请求 Explorer 将目标标签带到前台，可能产生重复标签；`Overwrite` 将当前可见标签导航到目标目录。
+3. 若目录未打开，调用 `SHOpenFolderAndSelectItems`，再轮询新视图并补做选择。
 
-顺序是**先复用、后打开**：
+Windows 11 24H2 build 26100 的观测显示：shell 可能在新窗口时丢弃选择请求；后台标签的选择可以成功但不可见；窗口可最小化或位于后方。因此成功路径还会恢复并置前窗口。选中补偿属于 best effort：文档化的 shell 调用成功后，即使补偿失败，也不将已经成功交给 shell 的请求改报失败。
 
-1. 先在**当前可见的标签**里选中：`Shell.Application → Windows → Document(文件夹视图) →
-   Folder.Self.Path` 匹配目标父目录，在 `Folder.Items` 中按名匹配目标项并调用
-   `FolderView.SelectItem`，随后把该窗口置前（含从最小化恢复）。命中就不再调用
-   `SHOpenFolderAndSelectItems`。视图存在但条目尚未列出（刚创建的文件，Explorer 异步刷新）
-   时最多再等 2 s 才放弃复用。
-2. 目录只存在于**后台标签**时（`Miss::Hidden`）按配置项分流：`overwrite` 对当前可见标签的
-   窗口对象调 `Navigate2(目标目录)`（实测有效；导航是异步的，最多等 1.5 s 让它上屏）后正常
-   选中；`newtab` **不调用**打开接口——实测对一个已经开着的目录再调
-   `SHOpenFolderAndSelectItems` 只会在后台标签里静默选中（用户看不见），于是改由
-   `explorer.exe <目录>` 把该标签带到前台，选中仍由第 1 步的 `FolderView.SelectItem` 完成。
-3. 没有任何标签匹配时才调用 `SHOpenFolderAndSelectItems` 打开目录。本机 shell（build 26100）
-   在**新建**窗口时丢弃它的选中请求（见 [research.md](research.md)），因此打开后再走第 1 步
-   同一条路补选中并置前，最多等 3 s 等待窗口创建完成。
+标签枚举使用窗口句柄和标题栏推断可见标签。`Shell.Windows` 每个标签各返回一个记录，但不提供活动标签字段；代码只把标题以标签名开头且后续是空格的记录判作可见，避免路径前缀相似造成误判。每轮轮询只枚举一次窗口，间隔从 25 ms 退避至 200 ms，并受每阶段墙钟预算约束。
 
-三段等待共用 `poll_within`（[src/automation.rs:385](../src/automation.rs#L385)）：25 ms 起步、
-每轮 ×1.5、200 ms 封顶，按墙钟预算截止。之前它们是固定 200 ms 一格，于是 5 ms 就到账的结果
-也要等满一格——那部分是我们自己加的，不是 shell 的；改成退避后"条目刚写入"那一档的取值由
-Explorer 自己的刷新速度决定（[latency.md](latency.md)）。每一轮的 `Shell.Windows` 遍历也只剩
-一遍：`Miss` 的两种"没选中"都带上帧 HWND，置前不再需要第二次全量重举。
+## COM 与调用阻塞
 
-标签页的四个实测事实决定了上面的形状：
+`ShellRevealer` 在调用线程执行 COM 操作。它会调用 `CoInitializeEx`；若线程已初始化为另一种 apartment，`RPC_E_CHANGED_MODE` 被视为可继续使用已有 COM，而不是 shell 失败。只有本次成功取得初始化计数时才调用 `CoUninitialize`，不会释放宿主拥有的 apartment。
 
-- 一个带 N 个标签的窗口在 `Shell.Windows` 里是 **N 条记录**（共用同一 HWND），且没有任何字段
-  标明哪条是当前标签。可用信号只有标题栏：`<当前标签显示名> 和 N 个其他选项卡 - 文件资源管理器`
-  （开启"在标题栏显示完整路径"时前半段是完整路径）。判定用"标题以该标签的名字**开头且随后是
-  空格**"，不能用"包含"：`D:\…\p1` 会被 `D:\…\p1-keeper 和 …` 的标题命中，于是把一个后台标签
-  当成可见标签，选中打在看不见的地方——用户读作"没反应"。
-- 对**后台标签**调 `FolderView.SelectItem` 会真的选中，但用户看不见；`Navigate2` 打在后台标签上
-  只刷新它、不切过去，`SHOpenFolderAndSelectItems` 也不切。UIA 也帮不上：标签项虽然能读到
-  `IsSelected`，却没有 Invoke/SelectionItem 模式，既不能切换也不能关闭。能切换的只有
-  `explorer.exe <目录>`（会多一个标签）与覆盖当前标签的 `Navigate2`，这就是
-  `REVEAL_TAB_POLICY` 的由来。
-- 后台标签的 `Document` 依然可用，所以判定用 `GetWindowTextW`，句柄取自
-  `IWebBrowser2.HWND`：该属性以 `VT_UI8`（type code `0x14`）返回，句柄就在变体载荷里，
-  用 `IsWindow` 校验后采用——按 `VT_I4` 读会全部拿到 0，这也是早先置前与可见性判断失灵的原因。
-  另外 `Shell.Windows` 在无窗口时仍含"此电脑"等非 `CabinetWClass` 条目，故只接受
-  `CabinetWClass` 的句柄，避免桌面/此电脑条目把 reveal 吞掉。
-- 窗口**最小化**时标题仍显示它的当前标签（所以"可见"判定为真），但 UIA 里列不出任何条目，
-  选中成功了用户也看不到——因此每次成功路径都要 `bring_to_front`，它负责 `SW_RESTORE` 与抢前台。
+等待 Explorer 刷新使用 `thread::sleep`，不会泵 GUI 消息。已打开视图查找最多等待 2 秒；发起打开后等待新视图和补选最多等待 3 秒。两个阶段在少见情况下可能连续发生，因此总阻塞时间可能接近 5 秒。常见暖路径为数十毫秒，冷路径、标签切换或刷新延迟可能达到秒级。GUI 宿主应将操作放到工作线程。
 
-## 选中的状态位
+## 两种 FFI 形态
 
-`SelectItem` 的状态位取 `SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`
-（`0x1|0x4|0x8|0x10`）。这里有个真实的坑：`_SVSIF` 里 `SVSI_EDIT = 0x3` **包含** `SVSI_SELECT`，
-所以把 bit0+bit1 一起置上（早期版本用的 `1|2`，以及看似无害的 `7`）等于请求"选中并进入重命名"，
-用户症状就是 reveal 后文件直接进了重命名框。位值以 `ShObjIdl_core.idl` 为准。
+默认构建由 [src/ffi/native.rs](../src/ffi/native.rs) 声明 7 个 shell32/ole32 函数。`official-bindings` feature 由 [src/ffi/official.rs](../src/ffi/official.rs) 转调 `windows` crate 的生成绑定。`src/ffi.rs` 在两种形态间选择同一组内部签名，因此业务逻辑只有一份。
 
-## 手写 IDispatch 客户端
+启用官方 feature 的测试仍编译 native 模块，以便 [src/crosscheck.rs](../src/crosscheck.rs) 将手写声明与官方 API 对照；官方 feature 的非测试构建不编译 native 模块。两种绑定共享 Explorer 自动化层，其中 IDispatch、VARIANT 和调用封装仍由项目手写。
 
-该客户端是手写的后期绑定 IDispatch（`GetIDsOfNames`/`Invoke` + 24 字节 `VARIANT`）；
-两种构建形态都保留它——`official-bindings` feature 只换掉那 7 个 shell 声明，不换这里，因为
-VARIANT/`DISPPARAMS` 的构造本身就是要测的代码，交给生成绑定等于把被测对象换成了依赖库。
-作为参数传出的 `BSTR` 必须是 `SysAllocString` 自己拥有的：
-传借用指针会让变体析构里的 `VariantClear` 释放不属于我们的内存，进程以 `0xC0000374`
-（堆损坏）崩掉。补偿失败不改变退出码：文档化 shell 调用已成功、目录已打开，补偿只负责把本机
-shell 丢掉的那一次选中补回来。
+## 选中状态
+
+`FolderView.SelectItem` 使用 `SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`。不能把 `SVSI_EDIT` 一并设置：该标志与 `SVSI_SELECT` 位值重叠，会导致目标进入重命名状态，而不是只高亮选中。
+
+更多真实环境结论见 [research.md](research.md)，覆盖情况见 [testing.md](testing.md)。

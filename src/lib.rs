@@ -142,8 +142,9 @@ pub trait Revealer {
 /// Both forms initialize COM on the calling thread but *adopt* an apartment the thread already
 /// has, including an MTA one — where `CoInitializeEx` answers `RPC_E_CHANGED_MODE`, a negative
 /// HRESULT for a call that still works — and never uninitialize an apartment owned by the host.
-/// They then block the calling thread while the shell catches up, with a 3 s ceiling, so a GUI
-/// host that cannot spare its UI thread makes the call from a worker.
+/// They then block the calling thread while the shell catches up: view lookup can wait up to
+/// 2 s and post-open selection up to 3 s, so a GUI host that cannot spare its UI thread makes
+/// the call from a worker.
 pub struct ShellRevealer;
 
 impl ShellRevealer {
