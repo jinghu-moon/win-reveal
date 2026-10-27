@@ -116,7 +116,7 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 同日发布元数据收口之后（`Cargo.toml` 加 `authors`/`readme`/`exclude`、新增 `CHANGELOG.md`），
 发布前校验：`cargo package --list` 打出的 23 个文件含 `CHANGELOG.md`、不含被 `[package] exclude`
 挡下的 `download-rust-repos.ps1`；`cargo publish --dry-run` 在隔离目录里重新编译通过
-（覆盖补强那批的树上为 186.0 KiB / 压缩 61.2 KiB；这个字节数随文本浮动，README 因此不再写它，
+（覆盖补强那批的树上为 186.1 KiB / 压缩 61.3 KiB；这个字节数随文本浮动，README 因此不再写它，
 以现测为准）。`.gitignore` 补了一条 `/.spec-workflow`——发现
 `cargo package` 会把未忽略的未跟踪文件（这里是某外部工具生成的 7 个模板）一并打进 crate，挡掉后
 清单回到干净的 23 个。非 Windows 目标的报错面用 `cargo check --target x86_64-linux-android` 量过：
