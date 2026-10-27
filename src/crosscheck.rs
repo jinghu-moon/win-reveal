@@ -2,10 +2,10 @@
 //
 // Compiled only for `cargo test`; the shipped binary still links nothing but system DLLs.
 // The parsing and argument-marshalling paths run here; the one thing that still never runs is
-// `SHOpenFolderAndSelectItems` with a *real* folder, because that opens an Explorer window. A
-// null folder is allowed: measured on build 26100 it either fails (`E_INVALIDARG` with an empty
-// array) or succeeds without doing anything visible (`S_OK` with one valid item), and neither
-// shape creates or reactivates a window.
+// `SHOpenFolderAndSelectItems` with a *real* folder, because that opens an Explorer window. An
+// empty item list is the safe stand-in: measured on build 26100 the shell returns `E_INVALIDARG`
+// before any window exists. Passing it a non-empty list instead makes it do real work, so the
+// file ends with the reason that variant is not a test.
 //
 // What is being verified:
 //   1. the verbatim-path failure that [`normalize`] works around is a property of the API,
@@ -13,15 +13,11 @@
 //   2. the (parent, child) split that reveal feeds to `SHOpenFolderAndSelectItems` is exactly
 //      what the official `IL*` helpers compute for the same path;
 //   3. the empty-argument edges both bindings must agree on, because reveal's error paths reach
-//      them (null folder, null PIDL);
-//   4. the one-item array reveal actually passes, including — when the feature is on — the
-//      slice reconstruction inside our own `ffi::official` wrapper.
+//      them (null folder, null PIDL).
 //
 // The hand-rolled side is reached as `ffi::native`, never through the flavour the build
 // selected: under `--features official-bindings` the two sides would otherwise be the same
-// binding and the comparison would prove nothing. One leg deliberately goes through the selected
-// flavour instead, because covering the wrapper is the point there, and it is marked with the
-// same `cfg(feature)` so it only exists where it means something.
+// binding and the comparison would prove nothing.
 
 use super::*;
 use std::fs;
@@ -191,7 +187,8 @@ fn our_parent_child_split_matches_the_official_helpers() {
 /// four-parameter signature (`pidl_folder, cidl, apidl, dw_flags`) on both sides to the same
 /// failure. Scope note: the official leg calls `Shell::` directly, which is what makes the two
 /// sides genuinely different code — and also means this test says nothing about the array
-/// reconstruction in our own `ffi::official` wrapper. That leg is the one-item array test below.
+/// reconstruction in our own `ffi::official` wrapper. Nothing in this file can; see the note at
+/// the bottom.
 #[test]
 fn both_bindings_refuse_a_null_folder_before_opening_one() {
     let _com = Com::init();
@@ -219,51 +216,15 @@ fn both_bindings_free_a_null_pidl_without_crashing() {
     unsafe { Shell::ILFree(None) };
 }
 
-/// The one-item array reveal really passes, at the folder argument that cannot open a window.
-///
-/// `reveal_parsed` calls `SHOpenFolderAndSelectItems(parent, 1, &child, 0)`, so a non-empty array
-/// is the only shape production uses — and the tests above pass either no array or an empty one,
-/// which is exactly what skips the `Some(slice::from_raw_parts(apidl, cidl))` reconstruction in
-/// the `ffi::official` wrapper. A null folder keeps it window-free: measured on build 26100 the
-/// call returns
-/// `S_OK` with `Shell.Windows` unchanged, and it is not a vacuous success — the shell dereferences
-/// `apidl` *before* rejecting the folder, so a bogus pointer there took the probe process down with
-/// an access violation. The item therefore has to come from a real parse, and a wrong base or
-/// length in the reconstruction shows up as a crash or a different code rather than agreeing by
-/// accident.
-#[test]
-fn both_bindings_marshal_a_one_item_array_to_the_same_result() {
-    let _com = Com::init();
-    let (dir, file) = fixture("one-item", "select 我.txt");
-
-    unsafe {
-        let wide = encode(&file);
-        let mut full: *mut c_void = ptr::null_mut();
-        let parsed = ffi::native::SHParseDisplayName(wide.as_ptr(), ptr::null(), &mut full, 0, ptr::null_mut());
-        assert_eq!(parsed, 0, "the fixture stopped parsing: {}", file.display());
-        let child = ffi::native::ILFindLastID(full);
-        let child_ptr: *const c_void = child;
-
-        let ours = ffi::native::SHOpenFolderAndSelectItems(ptr::null(), 1, &child_ptr, 0);
-        let theirs = Shell::SHOpenFolderAndSelectItems(ptr::null(), Some(&[child as *const ITEMIDLIST]), 0u32);
-        assert_eq!(ours as u32, 0, "a null folder with one valid item no longer returns S_OK");
-        assert_eq!(
-            code_of(theirs),
-            0,
-            "the official binding marshals the one-item array to a different result"
-        );
-
-        // The leg that only exists under the feature: this is our own wrapper, so the raw
-        // pointer/count pair really is rebuilt into a slice before the shell sees it.
-        #[cfg(feature = "official-bindings")]
-        assert_eq!(
-            ffi::SHOpenFolderAndSelectItems(ptr::null(), 1, &child_ptr, 0) as u32,
-            0,
-            "the official wrapper's slice reconstruction diverged from the raw call"
-        );
-
-        ffi::native::ILFree(full);
-    }
-
-    fs::remove_dir_all(&dir).unwrap();
-}
+// There used to be a fifth case here — null folder with a one-element array holding a real
+// parsed child — whose point was to reach the `from_raw_parts(apidl, cidl)` reconstruction inside
+// the `ffi::official` wrapper, which no other test in this file touches. It cannot stay in the
+// default suite: the same machine on the same day measured `S_OK` in 0.06s through a PowerShell
+// probe and `E_ABORT` (`0x8000_4004`) in 40.7s through this test binary, reproducibly. With a
+// non-empty array and no folder the shell does real work, so neither the code nor the duration is
+// ours to pin. That reconstruction is covered by the real Explorer case in `tests/ui_reveal.rs`
+// under `--features official-bindings`, which is the only place a genuine folder PIDL exists.
+//
+// Kept from the probe, because it is the reason a fake item is not usable as a fixture: the shell
+// dereferences `apidl` *before* rejecting the folder, and a bogus pointer there took the probe
+// process down with an access violation rather than returning an error code.
