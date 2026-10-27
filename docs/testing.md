@@ -3,7 +3,7 @@
 ## 怎么跑
 
 ```powershell
-cargo test                                          # 默认形态：55 passed / 3 ignored / 3 doctests
+cargo test                                          # 默认形态：54 passed / 3 ignored / 3 doctests
 cargo test --features official-bindings             # 官方绑定形态：同一基线
 cargo clippy --all-targets                          # 零警告（含 --features official-bindings）
 cargo +1.88.0 check --all-targets                   # MSRV 实测
@@ -15,7 +15,9 @@ REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真�
 
 - 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；二进制的
   `REVEAL_DRY_RUN=1|true|yes` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
-- `src/lib.rs` 单元测试 25 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
+- `src/tests.rs` 单元测试 25 个（crate 根的子模块，`src/lib.rs` 只留 `#[cfg(test)] mod tests;`——
+  子模块看得见根模块的私有项，搬到 `tests/` 就得为了可测而放宽公开面）：参数个数/空参/缺失、
+  相对路径按 cwd 解析、空格+中文、逗号+`&`、
   目录输入、尾分隔符、`..`、盘根拒绝、shell 失败映射为退出码 1、`REVEAL_TAB_POLICY` 默认值/
   大小写/非法值、`REVEAL_DRY_RUN` 的开/关/非法三档映射、每条 usage 错误以 `USAGE` 常量收尾
   （`--help` 里嵌的是同一个常量）、`Error` 确实实现了 `std::error::Error`（否则宿主项目的 `?`
@@ -38,10 +40,9 @@ REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真�
 
 ## 交叉校验（`src/crosscheck.rs`）
 
-5 个，只在 `cargo test` 编译，二进制不依赖它；调的都是**不会创建窗口**的参数与错误路径
-（`SHOpenFolderAndSelectItems` 只喂空 folder——实测 build 26100：空数组时在开窗前就 `E_INVALIDARG`，
-单元素真 PIDL 数组时返回 `S_OK` 且什么都不做；两种形状调用前后 `Shell.Windows` 的**条目逐条比对**
-都无变化），因此不开窗口：
+4 个，只在 `cargo test` 编译，二进制不依赖它；调的都是**不会创建窗口**的参数与错误路径
+（`SHOpenFolderAndSelectItems` 只喂空 folder + 空数组——实测 build 26100 在开窗前就返回
+`E_INVALIDARG`，调用前后 `Shell.Windows` 的**条目逐条比对**无变化），因此不开窗口：
 
 1. 同一个 `\\?\…` 路径，官方 `Shell::SHParseDisplayName` 与我们的声明返回**同一个**
    `0x80070057`，改写后两边都 `S_OK` → 归一化补的是 API 的约束，不是我们自己声明的错。
@@ -53,16 +54,18 @@ REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真�
    这一条直接调 `Shell::`，`ffi::official` 里的切片重建被绕开了（这是此前文档写强的一处，已收窄）。
 4. `ILFree(空 PIDL)`：两套绑定都当 no-op 不崩 → 解析失败时我们的代码照样把空 PIDL 交给 `ILFree`，
    这是活路径。
-5. 空 folder + **单元素真 PIDL 数组**（生产唯一的形状：`reveal_parsed` 硬编码
-   `cidl = 1`）：两套绑定都得 `S_OK`，且 `--features official-bindings` 下额外走一遍
-   `ffi::SHOpenFolderAndSelectItems`——那正是官方包装里
-   `Some(slice::from_raw_parts(apidl, cidl))` 的那一行。它不是空洞的成功：探针实测 shell 在拒绝
-   folder 之前**先解引用 `apidl`**，塞一个假指针 `0x1234` 直接把探针进程打崩（段错误），所以基址或
-   长度写错会表现为崩溃或不同的返回值，而不是碰巧对上。夹具因此必须是真解析出来的 child。
+
+**第 5 条曾经存在，现在被删掉了**，记录在这儿是为了别让人再补一遍：它用空 folder + 单元素真 PIDL
+数组，目的就是走一遍官方包装里的 `Some(slice::from_raw_parts(apidl, cidl))`（上面 4 条都绕开它）。
+它不能待在默认套件：同一台机器同一天，PowerShell 探针量到 `S_OK` / 0.06 s，Rust 测试二进制两次复现
+都是 `E_ABORT`（`0x8000_4004`）/ **40.7 s**。空 folder 配上非空数组时 shell 做的是真活，返回值和耗时
+都不由我们决定，"保证不开窗"更无从谈起。那条重建的覆盖来源只能是 `--features official-bindings` 下
+`--ignored` 的真 Explorer 用例——只有那里才有真 folder。探针另留下一条有用的事实：shell **先解引用
+`apidl` 再校验 folder**，塞假指针 `0x1234` 直接把探针进程打成段错误，所以伪造 PIDL 不能当夹具
+（后果是崩进程，不是返回错误码）。
 
 交叉校验始终走 `ffi::native`（不是当前形态选中的那套），否则 `--features official-bindings` 下两边
-变成同一份代码，断言就成了自证；只有第 5 条额外加了一条走选中形态的腿，因为它要覆盖的就是那套包装，
-并且用同一个 `cfg(feature)` 标着，只在有意义时存在。实测还留下一条 PIDL 常识：**同一路径两次解析的
+变成同一份代码，断言就成了自证。实测还留下一条 PIDL 常识：**同一路径两次解析的
 字节并不相同**（文件夹 item id 内嵌 shell 会刷新的时间戳），所以比较只能在同一块内存上做。
 
 ## 真弹窗测试（`tests/ui_reveal.rs`）
@@ -93,18 +96,21 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 ## 基线
 
 仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（2026-10-27，绑定覆盖补强那批之后：crosscheck 加第 5 条"单元素真 PIDL 数组"并
-把第 3 条写强的措辞收窄，只动 `src/crosscheck.rs` 与文档；单测 35→36、默认总数 54→55）：
-`cargo test` 与 `cargo test --features official-bindings` → 55 passed, 0 failed, 3 ignored，
-另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
-`cargo doc --no-deps` 两形态干净；`cargo +1.88.0 check --all-targets` 通过（MSRV 实测）。
-真弹窗与时延本批**未**重跑：生产路径一行没改，新增的腿走的是空 folder，实测不开窗也不激活已有
-窗口——省 8 个关不掉的标签。上一批（绑定解耦）两形态各跑过 → 2 passed，`overwrite` 一档仍实测到
-总标签数不变、target +1、foreground −1、标题栏换成目标目录；时延数字见 [latency.md](latency.md)。
+最近一次全量复验（2026-10-27，这一批做了两件事：把上一条"单元素真 PIDL 数组"的 crosscheck 测试
+**删掉**（它不可靠，理由见上节那条记录），以及把 `src/lib.rs` 尾部 345 行内联 `mod tests` 拆成
+兄弟文件 `src/tests.rs`）：`cargo test` 与 `cargo test --features official-bindings` → 54 passed,
+0 failed, 3 ignored，另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features
+official-bindings`）零警告；`cargo doc --no-deps` 两形态干净；`cargo +1.88.0 check --all-targets`
+与 `+1.88.0 test --doc` 通过（MSRV 实测）；两种形态的 release exe 仍是 **297,984 B**——拆的是
+`cfg(test)` 模块，产物理应一字节都没变，实测确认。
+真弹窗与时延本批**未**重跑：生产路径一行没改，而删除的那条腿恰恰是因为它会驱动 shell 做真活
+（40.7 s 且返回值不由我们决定）才离开的。上一批（绑定解耦）两形态各跑过 → 2 passed，`overwrite`
+一档仍实测到总标签数不变、target +1、foreground −1、标题栏换成目标目录；时延数字见
+[latency.md](latency.md)。
 
-新增那条的实测口径（探针脚本与输出用完即删）：空 folder + `cidl=1` + 真 child → `S_OK`，
-`Shell.Windows` 按 title 逐条比对在 5 秒后仍完全一致（8 条既有的用户标签，一条没多）；同参数换
-假指针 `0x1234` → 探针进程段错误，这就是"shell 先解引用 `apidl`"的证据。
+拆分用机械手段做，避免手抄 345 行出错：`sed -n '511,852p' | sed 's/^    //'` 抽出去，再把结果
+重新缩进 4 格与原区间 `diff`——只有空行多出 4 个空格这一验证副作用，非空行逐字节一致，证明没有
+字符串字面量被 dedent 改动。区间边界靠 `grep -n "^mod tests"` 定位，收尾的 `}` 单独留在 lib.rs。
 
 上一批（绑定解耦）的产物实测：门控 `native` 前后，两种形态的 release exe **都仍是 297,984 B**
 （哈希因注释导致的行号位移而变）→ 删掉的是官方形态里的死 extern 声明，链接器本就不码化它们，
@@ -116,8 +122,8 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 同日发布元数据收口之后（`Cargo.toml` 加 `authors`/`readme`/`exclude`、新增 `CHANGELOG.md`），
 发布前校验：`cargo package --list` 打出的 23 个文件含 `CHANGELOG.md`、不含被 `[package] exclude`
 挡下的 `download-rust-repos.ps1`；`cargo publish --dry-run` 在隔离目录里重新编译通过
-（覆盖补强那批的树上为 186.1 KiB / 压缩 61.3 KiB；这个字节数随文本浮动，README 因此不再写它，
+（本批树上为 184.0 KiB / 压缩 61.3 KiB；这个字节数随文本浮动，README 因此不再写它，
 以现测为准）。`.gitignore` 补了一条 `/.spec-workflow`——发现
 `cargo package` 会把未忽略的未跟踪文件（这里是某外部工具生成的 7 个模板）一并打进 crate，挡掉后
-清单回到干净的 23 个。非 Windows 目标的报错面用 `cargo check --target x86_64-linux-android` 量过：
+清单回到干净的 23 个；拆出 `src/tests.rs` 之后是 24 个。非 Windows 目标的报错面用 `cargo check --target x86_64-linux-android` 量过：
 9 条错误，首条即 crate 里那句 `compile_error!`。

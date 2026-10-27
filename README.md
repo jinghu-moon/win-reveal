@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 测试
 
 ```powershell
-cargo test                                        # 55 passed / 0 failed / 3 ignored + 3 doctests
+cargo test                                        # 54 passed / 0 failed / 3 ignored + 3 doctests
 cargo test --features official-bindings           # 同一基线
 cargo clippy --all-targets                        # 零警告
 REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗断言高亮
@@ -175,8 +175,8 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 `rust_sources/`（调研用的**第三方源码**，提交进可发布的仓库等于由我们承担再分发义务；来源记在
 `download-rust-repos.ps1`）、`tmp/`（人工验证的中文+逗号+空格夹具）、`.spec-workflow/`
 （外部工具在项目根生成的脚手架）。最后一条是发布前才补的：`cargo package` 会把**未被忽略的未跟踪
-文件**一起打进 crate，所以漏掉它等于把无关工具的模板发到 crates.io——它现在被挡住，dry-run 的
-23 文件清单里不再有它。
+文件**一起打进 crate，所以漏掉它等于把无关工具的模板发到 crates.io——它现在被挡住，`cargo package
+--list` 的清单里没有它（文件数与体积都现测，别信文档里的静态数字）。
 `Cargo.lock` **入库**：交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2` 的精确解析结果才谈得上
 "官方形态可复现"。`download-rust-repos.ps1` 入库但用 `[package] exclude` 挡在 crate 外：
 打包环境里没有 `rust_sources/` 可写，那个脚本进 crate 就是一件不能用的东西。
@@ -186,7 +186,7 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 `compile_error!`，那个站点的构建机上编译不过，所以**不要把 docs.rs 链接当"文档在这里"用**——
 读 README 与 `docs/`。
 
-发布前校验已过：`cargo publish --dry-run` 打包 23 个文件（不含 `.spec-workflow/` 这类工具脚手架，
+发布前校验已过：`cargo publish --dry-run` 打包 24 个文件（不含 `.spec-workflow/` 这类工具脚手架，
 字节数记在 [docs/testing.md](docs/testing.md)，它会随文档文本浮动）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
 远端在不在同步状态用 `git log origin/main..main` 现查——这句话每次提交都会变，所以不写死。
