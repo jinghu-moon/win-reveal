@@ -189,6 +189,6 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 发布前校验已过：`cargo publish --dry-run` 打包 23 个文件（不含 `.spec-workflow/` 这类工具脚手架，
 字节数记在 [docs/testing.md](docs/testing.md)，它会随文档文本浮动）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
-`main` 已推到 <https://github.com/jinghu-moon/win-reveal>；`v0.1.0` 是**本地附注标签**，打在已推送的
-这棵树（HEAD）上。剩下推这个标签、以及真正的 `cargo publish`（需要 crates.io token）还是人手上的
-动作，尚未执行。
+远端在不在同步状态用 `git log origin/main..main` 现查——这句话每次提交都会变，所以不写死。
+`v0.1.0` 是**本地附注标签**，指向要发布的那棵树且尚未推远端；推它、以及真正的 `cargo publish`
+（需要 crates.io token）还是人手上的动作。
