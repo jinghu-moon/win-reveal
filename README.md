@@ -186,7 +186,8 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 `compile_error!`，那个站点的构建机上编译不过，所以**不要把 docs.rs 链接当"文档在这里"用**——
 读 README 与 `docs/`。
 
-发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、181.8 KiB（压缩 59.8 KiB）并在隔离目录里
+发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、181.9 KiB（压缩 59.9 KiB；这个体积随
+文本浮动，以现测为准）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
 `main` 已推到 <https://github.com/jinghu-moon/win-reveal>；`v0.1.0` 是**本地附注标签**，打在已推送的
 这棵树（HEAD）上。剩下推这个标签、以及真正的 `cargo publish`（需要 crates.io token）还是人手上的
