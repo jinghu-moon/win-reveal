@@ -3,7 +3,7 @@
 ## 怎么跑
 
 ```powershell
-cargo test                                          # 默认形态：54 passed / 3 ignored / 3 doctests
+cargo test                                          # 默认形态：55 passed / 3 ignored / 3 doctests
 cargo test --features official-bindings             # 官方绑定形态：同一基线
 cargo clippy --all-targets                          # 零警告（含 --features official-bindings）
 cargo +1.88.0 check --all-targets                   # MSRV 实测
@@ -38,24 +38,32 @@ REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真�
 
 ## 交叉校验（`src/crosscheck.rs`）
 
-4 个，只在 `cargo test` 编译，二进制不依赖它；调的都是**不会创建窗口**的参数与错误路径
-（`SHOpenFolderAndSelectItems` 只喂空 folder——实测 build 26100 上在开窗前就 `E_INVALIDARG`，
-调用前后 `Shell.Windows` 计数不变），因此不开窗口：
+5 个，只在 `cargo test` 编译，二进制不依赖它；调的都是**不会创建窗口**的参数与错误路径
+（`SHOpenFolderAndSelectItems` 只喂空 folder——实测 build 26100：空数组时在开窗前就 `E_INVALIDARG`，
+单元素真 PIDL 数组时返回 `S_OK` 且什么都不做；两种形状调用前后 `Shell.Windows` 的**条目逐条比对**
+都无变化），因此不开窗口：
 
 1. 同一个 `\\?\…` 路径，官方 `Shell::SHParseDisplayName` 与我们的声明返回**同一个**
    `0x80070057`，改写后两边都 `S_OK` → 归一化补的是 API 的约束，不是我们自己声明的错。
 2. 官方解析出一个 PIDL 后 `ILClone` 一份，用**我们的** `ILFindLastID`/`ILRemoveLastID`/`ILFree`
    操作它，再用官方 `ILIsParent(ours, full, true|false)` 断言截留的正是直接父级，并比较子项字节
    → 拆分算法与官方 helper 一致，且 `ILFree` 与官方共用同一个分配器。
-3. 空 folder 的 `SHOpenFolderAndSelectItems`：两套绑定都返回 `0x80070057` → 把 reveal 真正调用
-   的那个四参数签名（`pidl_folder, cidl, apidl, dw_flags`）与官方包装里的 `Option`/切片重建钉住；
-   这是以前没人守的一条，因为真 folder 参数会弹资源管理器。
+3. 空 folder + 空数组：两套绑定都返回 `0x80070057` → 把 reveal 真正调用的那个四参数签名
+   （`pidl_folder, cidl, apidl, dw_flags`）在两套声明边界上钉住。**它钉不住的是我们自己的包装**：
+   这一条直接调 `Shell::`，`ffi::official` 里的切片重建被绕开了（这是此前文档写强的一处，已收窄）。
 4. `ILFree(空 PIDL)`：两套绑定都当 no-op 不崩 → 解析失败时我们的代码照样把空 PIDL 交给 `ILFree`，
    这是活路径。
+5. 空 folder + **单元素真 PIDL 数组**（生产唯一的形状：`reveal_parsed` 硬编码
+   `cidl = 1`）：两套绑定都得 `S_OK`，且 `--features official-bindings` 下额外走一遍
+   `ffi::SHOpenFolderAndSelectItems`——那正是官方包装里
+   `Some(slice::from_raw_parts(apidl, cidl))` 的那一行。它不是空洞的成功：探针实测 shell 在拒绝
+   folder 之前**先解引用 `apidl`**，塞一个假指针 `0x1234` 直接把探针进程打崩（段错误），所以基址或
+   长度写错会表现为崩溃或不同的返回值，而不是碰巧对上。夹具因此必须是真解析出来的 child。
 
 交叉校验始终走 `ffi::native`（不是当前形态选中的那套），否则 `--features official-bindings` 下两边
-变成同一份代码，断言就成了自证。实测还留下一条 PIDL 常识：**同一路径两次解析的字节并不相同**
-（文件夹 item id 内嵌 shell 会刷新的时间戳），所以比较只能在同一块内存上做。
+变成同一份代码，断言就成了自证；只有第 5 条额外加了一条走选中形态的腿，因为它要覆盖的就是那套包装，
+并且用同一个 `cfg(feature)` 标着，只在有意义时存在。实测还留下一条 PIDL 常识：**同一路径两次解析的
+字节并不相同**（文件夹 item id 内嵌 shell 会刷新的时间戳），所以比较只能在同一块内存上做。
 
 ## 真弹窗测试（`tests/ui_reveal.rs`）
 
@@ -85,22 +93,22 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 ## 基线
 
 仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（2026-10-27，绑定解耦那批改动之后：`native` 模块改成
-`#[cfg(any(not(feature = "official-bindings"), test))]`、crosscheck 加两条契约测试（空 folder 的
-`SHOpenFolderAndSelectItems`、`ILFree(空 PIDL)`），单测数 33→35、默认总数 52→54；两种形态各跑一遍，
-结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 54 passed, 0 failed, 3 ignored，
+最近一次全量复验（2026-10-27，绑定覆盖补强那批之后：crosscheck 加第 5 条"单元素真 PIDL 数组"并
+把第 3 条写强的措辞收窄，只动 `src/crosscheck.rs` 与文档；单测 35→36、默认总数 54→55）：
+`cargo test` 与 `cargo test --features official-bindings` → 55 passed, 0 failed, 3 ignored，
 另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
-`cargo +1.88.0 check --all-targets` 与 `cargo +1.88.0 test --doc` 通过（MSRV 实测）；
-`REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored --test-threads=1` 在两种形态下各
-→ 2 passed（本批真跑，其中 `overwrite` 一档仍实测到总标签数不变、target +1、foreground −1、
-标题栏换成目标目录）。时延数字沿用同日库宿主适配那批的实测（见下段）——本批只删死声明、加测试，
-不碰被计时的 reveal 路径，故未重跑 `latency`（省 8 个标签）；新数字见 [latency.md](latency.md)。
+`cargo doc --no-deps` 两形态干净；`cargo +1.88.0 check --all-targets` 通过（MSRV 实测）。
+真弹窗与时延本批**未**重跑：生产路径一行没改，新增的腿走的是空 folder，实测不开窗也不激活已有
+窗口——省 8 个关不掉的标签。上一批（绑定解耦）两形态各跑过 → 2 passed，`overwrite` 一档仍实测到
+总标签数不变、target +1、foreground −1、标题栏换成目标目录；时延数字见 [latency.md](latency.md)。
 
-同一次绑定解耦复验的产物实测：门控 `native` 前后，两种形态的 release exe **都仍是 297,984 B**
+新增那条的实测口径（探针脚本与输出用完即删）：空 folder + `cidl=1` + 真 child → `S_OK`，
+`Shell.Windows` 按 title 逐条比对在 5 秒后仍完全一致（8 条既有的用户标签，一条没多）；同参数换
+假指针 `0x1234` → 探针进程段错误，这就是"shell 先解引用 `apidl`"的证据。
+
+上一批（绑定解耦）的产物实测：门控 `native` 前后，两种形态的 release exe **都仍是 297,984 B**
 （哈希因注释导致的行号位移而变）→ 删掉的是官方形态里的死 extern 声明，链接器本就不码化它们，
-收益是意图与少编译一个模块，不是体积。crosscheck 新增两条都不开窗（空 folder 前后 `Shell.Windows`
-计数实测不变，`ILFree(空)` 无崩溃）。
+收益是意图与少编译一个模块，不是体积。
 
 更早一批（库宿主适配：`init_apartment` 三态、`RecordingRevealer` 换 `Mutex`、三段等待改退避）
 复验为 52 passed；
