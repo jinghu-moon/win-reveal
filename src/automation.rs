@@ -15,6 +15,7 @@ use std::os::raw::c_void;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::ptr;
+use std::time::{Duration, Instant};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -374,18 +375,45 @@ fn same_path(a: &OsStr, b: &OsStr) -> bool {
     normalized(a) == normalized(b)
 }
 
+/// Polls until `attempt` yields `Some`, and returns `fallback` once `budget` of wall clock has
+/// gone. Waits back off from 25 ms to 200 ms between attempts.
+///
+/// Every "wait for the shell to refresh" loop here used a fixed 200 ms tick, so a result that
+/// had already landed 5 ms in still cost 200 ms — measured on build 26100, that is what put
+/// the just-created-file case at ~570 ms while a warm re-select costs 65 ms in total. The
+/// ceilings (2 s / 3 s / 1.5 s) are unchanged; first answers arrive 8× sooner.
+pub(crate) fn poll_within<T>(
+    budget: Duration,
+    fallback: T,
+    mut attempt: impl FnMut() -> Option<T>,
+) -> T {
+    let started = Instant::now();
+    let mut delay = Duration::from_millis(25);
+    loop {
+        if let Some(value) = attempt() {
+            return value;
+        }
+        if started.elapsed() >= budget {
+            return fallback;
+        }
+        std::thread::sleep(delay);
+        delay = (delay + delay / 2).min(Duration::from_millis(200));
+    }
+}
+
 /// Why no selection could be applied.
 pub enum Miss {
     /// No Explorer tab shows the parent folder.
     NoView,
     /// The folder is open, but only in a tab the user is not looking at, and the tab policy
-    /// refuses to take over the visible tab. The caller can still ask the shell to activate
-    /// that tab; see `activate_tab_by_path`.
-    Hidden,
+    /// refuses to take over the visible tab. Carries the frame HWND: the caller can still raise
+    /// it and ask the shell to activate that tab; see [`activate_tab_by_path`].
+    Hidden(i64),
     /// A visible tab shows the parent folder but does not list the item yet — Explorer
     /// refreshes its item list asynchronously, so a just-created file can be missing for a
-    /// moment.
-    ItemNotListed,
+    /// moment. Carries the frame HWND so the caller can raise the window it just caused while
+    /// it waits.
+    ItemNotListed(i64),
 }
 
 /// `Shell.Application` -> `Windows`.
@@ -538,32 +566,6 @@ fn titles_tab(title: &str, name: &str) -> bool {
             || (title.starts_with(name) && title[name.len()..].starts_with(' ')))
 }
 
-/// The Explorer window currently showing `parent`. A window whose matching tab is the one
-/// on screen wins over one where the folder sits in a background tab, because the caller
-/// raises this frame to make the reveal visible — raising a window that is showing
-/// something else would look like "nothing happened".
-///
-/// A window the shell creates can come up minimized (it restores the state of the last
-/// closed one) or behind the caller's own window, which is why it is raised as soon as it
-/// exists rather than only once the item can be selected.
-pub fn front_window_for(parent: &Path) -> Option<i64> {
-    let windows = shell_windows().ok()?;
-    let mut shown = None;
-    let mut hidden = None;
-    for view in views(&windows) {
-        if !is_cabinet(view.hwnd) || !same_path(&view.path, parent.as_os_str()) {
-            continue;
-        }
-        if tab_is_visible(&view) && shown.is_none() {
-            shown = Some(view.hwnd);
-        }
-        if hidden.is_none() {
-            hidden = Some(view.hwnd);
-        }
-    }
-    shown.or(hidden)
-}
-
 /// What to do when the containing folder is already open, but in a tab the user is not
 /// looking at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -596,10 +598,17 @@ pub fn select_in_open_view(parent: &Path, file_name: &OsStr, switch: Switch) -> 
     if matching.is_empty() {
         return Err(Miss::NoView);
     }
-    let frame = matching[0].hwnd;
+    // Prefer a frame whose own tab is the one on screen: when two windows show the same folder,
+    // raising the visible one is what makes the reveal seen. The caller used to get that from a
+    // second full enumeration per retry round; the miss carries the HWND instead.
+    let frame = matching
+        .iter()
+        .find(|view| tab_is_visible(view))
+        .unwrap_or(&matching[0])
+        .hwnd;
     if !matching.iter().any(tab_is_visible) {
         if switch == Switch::NewTab {
-            return Err(Miss::Hidden);
+            return Err(Miss::Hidden(frame));
         }
         let shown = views(&windows)
             .into_iter()
@@ -607,16 +616,13 @@ pub fn select_in_open_view(parent: &Path, file_name: &OsStr, switch: Switch) -> 
             .map(|view| navigate_tab(&view, parent))
             .unwrap_or(false);
         if !shown {
-            return Err(Miss::Hidden);
+            return Err(Miss::Hidden(frame));
         }
         // Navigation is asynchronous: re-enumerate until the folder is on screen.
-        for _ in 0..10 {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+        poll_within(Duration::from_millis(1500), (), || {
             matching = views(&windows).into_iter().filter(show_folder).collect();
-            if matching.iter().any(tab_is_visible) {
-                break;
-            }
-        }
+            matching.iter().any(tab_is_visible).then_some(())
+        });
     }
     let mut selected = false;
     for view in matching.iter().filter(|view| tab_is_visible(view)) {
@@ -629,7 +635,7 @@ pub fn select_in_open_view(parent: &Path, file_name: &OsStr, switch: Switch) -> 
         // The folder is on screen but does not list the item yet — Explorer refreshes its
         // item list asynchronously, so a just-created file can be missing for a moment.
         // The caller retries.
-        Err(Miss::ItemNotListed)
+        Err(Miss::ItemNotListed(frame))
     }
 }
 
@@ -650,11 +656,12 @@ fn navigate_tab(view: &View, folder: &Path) -> bool {
 /// Ask the shell to show `folder` in the tab that already holds it.
 ///
 /// `SHOpenFolderAndSelectItems` selects inside a background tab and leaves it there, and
-/// nothing else the shell exposes switches to it, so this uses the shell's own command line
-/// — measured on build 26100 to activate the existing tab of `folder` without adding one and
-/// without touching the tab the user was reading. It is strictly a *visibility* assist: no
-/// `/select,` prefix is passed, because that form duplicates the tab and, as measured long
-/// ago, does not select. Selection stays with `select_item`, on the tab this just brought
+/// nothing else the shell exposes switches to it, so this uses the shell's own command line —
+/// measured on build 26100 as the only way to get the folder onto the screen without touching
+/// the tab the user was reading. It is strictly a *visibility* assist, and it costs a duplicate
+/// tab for `folder` (repeated reveals accumulate them), which is why [`Switch::Overwrite`]
+/// exists. No `/select,` prefix is passed: that form duplicates the tab too and, as measured
+/// long ago, does not select. Selection stays with `select_item`, on the tab this just brought
 /// forward. The path goes to `explorer.exe` as one argument, so quoting is the OS's, not a
 /// hand-built command line.
 pub fn activate_tab_by_path(folder: &Path) {

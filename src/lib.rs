@@ -34,7 +34,6 @@ mod ffi;
 mod crosscheck;
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
@@ -42,6 +41,8 @@ use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
+use std::sync::Mutex;
+use std::time::Duration;
 
 // The tab policy is a caller's choice, not an implementation detail: the CLI expresses it as
 // `REVEAL_TAB_POLICY`, a library host passes it to [`ShellRevealer::reveal_with`].
@@ -55,6 +56,9 @@ pub const EXIT_SHELL: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
+/// `MAKE_HRESULT(SEVERITY_ERROR, FACILITY_RPC, 6)`: the thread already has an apartment in a
+/// mode other than the one asked for.
+const RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32 as i32;
 
 /// Setting that chooses what happens when the target folder is already open in a tab the
 /// user is not looking at. Accepted values: `newtab` (default) and `overwrite`.
@@ -134,6 +138,12 @@ pub trait Revealer {
 /// variable, which is what a CLI wants. A library caller that would rather not put its
 /// configuration into its own process environment calls [`ShellRevealer::reveal_with`] and
 /// passes the policy as an argument instead.
+///
+/// Both forms initialize COM on the calling thread but *adopt* an apartment the thread already
+/// has, including an MTA one — where `CoInitializeEx` answers `RPC_E_CHANGED_MODE`, a negative
+/// HRESULT for a call that still works — and never uninitialize an apartment owned by the host.
+/// They then block the calling thread while the shell catches up, with a 3 s ceiling, so a GUI
+/// host that cannot spare its UI thread makes the call from a worker.
 pub struct ShellRevealer;
 
 impl ShellRevealer {
@@ -153,14 +163,8 @@ impl ShellRevealer {
     pub fn reveal_with(path: &Path, switch: Switch) -> Result<(), Error> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         // Every shell call below is COM-based and requires an initialized apartment;
-        // a fresh CLI process has none.
-        let hr = unsafe { ffi::CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
-        if hr < 0 {
-            return Err(Error::Shell {
-                step: "CoInitializeEx",
-                hresult: hr as u32,
-            });
-        }
+        // a fresh CLI process has none, a library host usually has one already.
+        let ours = init_apartment()?;
         let result = match select_in_already_open_view(path, switch) {
             Found::Done => Ok(()),
             // The folder is already in the user's window, only out of sight: bringing that
@@ -172,7 +176,9 @@ impl ShellRevealer {
             }
             Found::NotOpen => reveal_parsed(&wide).map(|()| ensure_selected(path, switch)),
         };
-        unsafe { ffi::CoUninitialize() };
+        if ours {
+            unsafe { ffi::CoUninitialize() };
+        }
         result
     }
 }
@@ -242,22 +248,21 @@ fn select_in_already_open_view(path: &Path, switch: Switch) -> Found {
     };
     // A view can exist but not list a just-created file yet; wait for Explorer's
     // asynchronous refresh before giving up and opening the folder anew.
-    for _ in 0..10 {
-        match automation::select_in_open_view(parent, name, switch) {
+    automation::poll_within(
+        Duration::from_millis(2000),
+        Found::NotOpen,
+        || match automation::select_in_open_view(parent, name, switch) {
             Ok(hwnd) => {
                 automation::bring_to_front(hwnd);
-                return Found::Done;
+                Some(Found::Done)
             }
-            // Only the item is missing, the folder is on screen: after the wait, fall
+            // Only the item is missing, the folder is on screen: keep waiting, then fall
             // through to the open call, which is also what refreshes the item list.
-            Err(automation::Miss::ItemNotListed) => {
-                std::thread::sleep(std::time::Duration::from_millis(200))
-            }
-            Err(automation::Miss::Hidden) => return Found::Hidden,
-            Err(automation::Miss::NoView) => return Found::NotOpen,
-        }
-    }
-    Found::NotOpen
+            Err(automation::Miss::ItemNotListed(_)) => None,
+            Err(automation::Miss::Hidden(_)) => Some(Found::Hidden),
+            Err(automation::Miss::NoView) => Some(Found::NotOpen),
+        },
+    )
 }
 
 /// Some Windows 11 shells open the folder but drop the requested selection when they
@@ -272,37 +277,52 @@ fn ensure_selected(path: &Path, switch: Switch) {
         return;
     };
     let mut asked = false;
-    for _ in 0..15 {
-        if let Some(hwnd) = automation::front_window_for(parent) {
-            automation::bring_to_front(hwnd);
-            match automation::select_in_open_view(parent, name, switch) {
-                Ok(_) => return,
-                // Reached once, and only when the folder is open out of sight: the shell put
-                // it in the user's existing window and left their own tab in front.
-                Err(automation::Miss::Hidden) if !asked && switch == Switch::NewTab => {
+    // One pass over Shell.Windows per round: each miss already carries the frame to raise, so
+    // the window lookup that used to run first would repeat the whole enumeration.
+    automation::poll_within(Duration::from_millis(3000), (), || {
+        match automation::select_in_open_view(parent, name, switch) {
+            Ok(hwnd) => {
+                automation::bring_to_front(hwnd);
+                Some(())
+            }
+            // The window the shell just created can come up minimized (it restores the state of
+            // the last closed one) or behind the caller's, so raise it as soon as it exists
+            // rather than only once the item can be selected.
+            Err(automation::Miss::ItemNotListed(hwnd)) => {
+                automation::bring_to_front(hwnd);
+                None
+            }
+            Err(automation::Miss::Hidden(hwnd)) => {
+                automation::bring_to_front(hwnd);
+                // Reached once, and only when the folder is open out of sight: the shell put it
+                // in the user's existing window and left their own tab in front.
+                if switch == Switch::NewTab && !asked {
                     asked = true;
                     automation::activate_tab_by_path(parent);
                 }
-                Err(_) => {}
+                None
             }
+            Err(automation::Miss::NoView) => None,
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    });
 }
 
 /// Records every path it is asked to reveal instead of touching the shell.
+///
+/// `Send + Sync` on purpose: a host's test suite hands the double to whatever thread runs the
+/// call, often behind `Arc<dyn Revealer + Send + Sync>`.
 #[derive(Default)]
-pub struct RecordingRevealer(pub RefCell<Vec<PathBuf>>);
+pub struct RecordingRevealer(pub Mutex<Vec<PathBuf>>);
 
 impl RecordingRevealer {
     pub fn recorded(&self) -> Vec<PathBuf> {
-        self.0.borrow().clone()
+        self.0.lock().unwrap().clone()
     }
 }
 
 impl Revealer for RecordingRevealer {
     fn reveal(&self, path: &Path) -> Result<(), Error> {
-        self.0.borrow_mut().push(path.to_path_buf());
+        self.0.lock().unwrap().push(path.to_path_buf());
         Ok(())
     }
 }
@@ -433,6 +453,28 @@ pub fn run(
             }
             code
         }
+    }
+}
+
+/// Initialize COM on the calling thread and report whether *this call* owns the matching
+/// `CoUninitialize`.
+///
+/// A CLI process starts with no apartment, but a library host usually already has one:
+/// `CoInitializeEx` then answers `S_FALSE` (count incremented, so we must decrement) or, when
+/// the host initialized the thread in another mode, `RPC_E_CHANGED_MODE` — a negative HRESULT
+/// for a call that is perfectly usable. Treating that as a shell failure would deny a GUI host
+/// the one thing it asked for, so the apartment stays the host's and we never uninitialize it.
+fn init_apartment() -> Result<bool, Error> {
+    let hr = unsafe { ffi::CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+    if hr == RPC_E_CHANGED_MODE {
+        Ok(false)
+    } else if hr >= 0 {
+        Ok(true)
+    } else {
+        Err(Error::Shell {
+            step: "CoInitializeEx",
+            hresult: hr as u32,
+        })
     }
 }
 
@@ -781,5 +823,31 @@ mod tests {
         // notice the impl going away, because no test names it.
         fn takes<E: std::error::Error>() {}
         takes::<Error>();
+    }
+
+    #[test]
+    fn an_apartment_the_host_already_owns_is_not_reported_as_failure() {
+        // Stands in for a GUI host that initialized this thread as MTA before calling us:
+        // asking for STA on top of that is RPC_E_CHANGED_MODE, a negative HRESULT for a call
+        // that is perfectly usable. Refusing it would break every such host, and uninitializing
+        // would tear down the host's apartment rather than ours.
+        let host = unsafe { ffi::CoInitializeEx(ptr::null(), 0) }; // 0 = COINIT_MULTITHREADED
+        assert!(host == 0 || host == 1, "MTA init failed: {host:#010x}");
+        assert_eq!(
+            init_apartment(),
+            Ok(false),
+            "a host-owned apartment must be adopted, not refused"
+        );
+        unsafe { ffi::CoUninitialize() };
+    }
+
+    #[test]
+    fn the_revealers_can_be_shared_across_threads() {
+        // A host hands a revealer to whatever thread makes the call, usually behind
+        // `Arc<dyn Revealer + Send + Sync>`. A `RefCell` inside the recorder made that not
+        // compile, and no other test names the trait bounds.
+        fn takes<T: Send + Sync + Revealer>() {}
+        takes::<RecordingRevealer>();
+        takes::<ShellRevealer>();
     }
 }

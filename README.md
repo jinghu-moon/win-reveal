@@ -19,10 +19,11 @@ cargo build --release                          # → target\release\reveal.exe
 cargo build --release --features official-bindings   # 换官方绑定形态，行为完全相同
 ```
 
-在 `Cargo.toml` 里被依赖：
+在 `Cargo.toml` 里被依赖。这个 crate 在非 Windows 目标直接 `compile_error!`（没有跨平台桩），
+所以跨平台宿主要把依赖挂在 cfg 下，否则在 Linux/macOS 上连 `cargo check` 都过不去：
 
 ```toml
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 win-reveal = "0.1"          # v0.1.0 还没发布到 crates.io；在那之前写成 path = "../win-reveal"
 ```
 
@@ -90,13 +91,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | 项 | 位置 | 给宿主项目做什么 |
 |:--|:--|:--|
-| `trait Revealer` / `ShellRevealer` / `RecordingRevealer` | [src/lib.rs:126](src/lib.rs#L126) / [:137](src/lib.rs#L137) / [:295](src/lib.rs#L295) | 唯一的注入边界；recorder 让宿主自己的测试不必弹资源管理器 |
-| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:153](src/lib.rs#L153) | 同一条路，只是策略来自参数——不去动进程 env（`set_var` 在新 edition 里已是 unsafe，还会被子进程继承） |
-| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:570](src/automation.rs#L570)，由 [src/lib.rs:48](src/lib.rs#L48) 再导出 | 两个变体的文档写的是实测代价，不是字面含义 |
-| `enum Error`（7 个变体） | [src/lib.rs:74](src/lib.rs#L74) | `NotFound` / `NoParent` / `BadSetting` / `Shell{step, hresult}` 可分派，`Display` 文案与 CLI 一致 |
-| `resolve(raw, cwd)` | [src/lib.rs:364](src/lib.rs#L364) | 只做形态归一＋绝对化＋存在性与父目录检查，完全不碰 shell |
-| `run(args, cwd, revealer, stderr) -> i32` | [src/lib.rs:412](src/lib.rs#L412) | 整套 CLI 语义，但 cwd、stderr、实现都是参数，可嵌进 GUI 或自己的命令行 |
-| `EXIT_OK`/`EXIT_SHELL`/`EXIT_USAGE`、`USAGE`、`DRY_RUN_VAR`、`dry_run_setting()` | [src/lib.rs:51-70](src/lib.rs#L51)、[:221](src/lib.rs#L221) | 包装 `run` 时不必抄数字；复用同一行 usage 与同一套取值规则 |
+| `trait Revealer` / `ShellRevealer` / `RecordingRevealer` | [src/lib.rs:130](src/lib.rs#L130) / [:147](src/lib.rs#L147) / [:315](src/lib.rs#L315) | 唯一的注入边界；recorder 让宿主自己的测试不必弹资源管理器 |
+| `ShellRevealer::reveal_with(path, Switch)` | [src/lib.rs:163](src/lib.rs#L163) | 同一条路，只是策略来自参数——不去动进程 env（`set_var` 在新 edition 里已是 unsafe，还会被子进程继承） |
+| `enum Switch { NewTab, Overwrite }` | [src/automation.rs:572](src/automation.rs#L572)，由 [src/lib.rs:49](src/lib.rs#L49) 再导出 | 两个变体的文档写的是实测代价，不是字面含义 |
+| `enum Error`（7 个变体） | [src/lib.rs:78](src/lib.rs#L78) | `NotFound` / `NoParent` / `BadSetting` / `Shell{step, hresult}` 可分派，`Display` 文案与 CLI 一致 |
+| `resolve(raw, cwd)` | [src/lib.rs:384](src/lib.rs#L384) | 只做形态归一＋绝对化＋存在性与父目录检查，完全不碰 shell |
+| `run(args, cwd, revealer, stderr) -> i32` | [src/lib.rs:432](src/lib.rs#L432) | 整套 CLI 语义，但 cwd、stderr、实现都是参数，可嵌进 GUI 或自己的命令行 |
+| `EXIT_OK`/`EXIT_SHELL`/`EXIT_USAGE`、`USAGE`、`DRY_RUN_VAR`、`dry_run_setting()` | [src/lib.rs:52-74](src/lib.rs#L52)、[:227](src/lib.rs#L227) | 包装 `run` 时不必抄数字；复用同一行 usage 与同一套取值规则 |
+
+**库宿主还需要知道三件事**（都不必额外配置）：
+
+- **套间**：`reveal_with` 在调用线程上初始化 COM，但**沿用宿主已有的套间**——包括线程已经按
+  MTA 初始化的情况。那时 `CoInitializeEx` 返回 `RPC_E_CHANGED_MODE`（负 HRESULT，COM 却完全
+  可用），我们照常执行，并且**不会**替宿主 `CoUninitialize`；只有其它真正的失败才映射成
+  `Error::Shell`。
+- **阻塞**：等 shell 刷新用的是 `thread::sleep`，不泵消息。成功路径一般在几十毫秒内返回，
+  最坏 3 s 上限。GUI 宿主若不想让"在资源管理器中显示"卡住 UI 线程，把这个调用放到工作线程。
+- **线程**：`ShellRevealer` 与 `RecordingRevealer` 都满足 `Send + Sync`，可以放进
+  `Arc<dyn Revealer + Send + Sync>` 交给别的线程（recorder 内部是 `Mutex`，不是 `RefCell`）。
 
 **MSRV `1.88`**：这是实测过的最低工具链，本机装了 1.88.0，`cargo +1.88.0 check --all-targets`
 （两种形态）与 `cargo +1.88.0 test --doc` 都通过。更低的版本没装、没实测，就不写进元数据。
@@ -105,20 +117,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 差别只在 shell 绑定的来源（见 [src/ffi.rs](src/ffi.rs)）：
 
-| 形态 | 命令 | shell 绑定 | 产物 |
+| 形态 | 命令 | shell 绑定 | 产物（本次构建实测） |
 |:--|:--|:--|:--|
-| 零依赖（默认） | `cargo build --release` | `extern "system"` 自声明 7 个函数 | `reveal.exe` 297,472 B（留档名 `reveal-native.exe`） |
-| 官方绑定 | `cargo build --release --features official-bindings` | 同名包装，转调 `windows` 0.62.2 | 298,496 B（`reveal-official.exe`） |
+| 零依赖（默认） | `cargo build --release` | `extern "system"` 自声明 7 个函数 | `reveal.exe` 297,984 B（留档名 `reveal-native.exe`） |
+| 官方绑定 | `cargo build --release --features official-bindings` | 同名包装，转调 `windows` 0.62.2 | 297,984 B（`reveal-official.exe`） |
 
-官方形态同样不引入运行时第三方代码：调的还是那两个系统 DLL，只是绑定由微软生成，产物大
-1,024 B、编译期多出 `windows-core` 等 crate。两者的可观察行为、退出码与时延同一量级，
-按需要选一种即可。feature 不叫 `windows`：在一个整体仅 Windows 的 crate 上，
-`--features windows` 读起来像"默认构建还不支持 Windows"。
+官方形态同样不引入运行时第三方代码：调的还是那两个系统 DLL，只是绑定由微软生成，编译期多出
+`windows-core` 等 crate。这一档字节差不是恒定的：早先测到官方形态大 1,024 B，这次两者同为
+297,984 B（哈希不同，确认是两份不同产物），所以它只是链接布局的偶然，不是形态的固有代价。
+两者的可观察行为、退出码与时延同一量级，按需要选一种即可。feature 不叫 `windows`：在一个整体
+仅 Windows 的 crate 上，`--features windows` 读起来像"默认构建还不支持 Windows"。
 
 ## 测试
 
 ```powershell
-cargo test                                        # 50 passed / 0 failed / 3 ignored + 3 doctests
+cargo test                                        # 52 passed / 0 failed / 3 ignored + 3 doctests
 cargo test --features official-bindings           # 同一基线
 cargo clippy --all-targets                        # 零警告
 REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗断言高亮
@@ -130,9 +143,10 @@ REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗�
 
 ## 表现预期
 
-- **时延**：地板约 18 ms；在你正看着的文件夹里换选一个文件约 65 ms；目标目录没开过、或条目刚
-  写入、或在后台标签时是 0.6–1.5 s，因为代价花在**等 shell**（有上限的重试轮询），不花在调用。
-  两种形态同数量级。数据与测法：[docs/latency.md](docs/latency.md)。
+- **时延**：地板约 18 ms；在你正看着的文件夹里换选一个文件约 50–60 ms；目标目录没开过约 0.9 s、
+  条目刚写入约 0.4–1.2 s、后台标签配默认策略约 1.1–1.3 s。秒级那部分花在**等 shell**（有墙钟
+  上限的退避轮询），不花在调用上；它随你打开的标签数线性增长。两种形态同数量级，数据与测法见
+  [docs/latency.md](docs/latency.md)。
 - **只打开目录、没有高亮**：多半是该 shell 不暴露 `FolderView`，或本机 shell 缺陷。判别方法与
   两种结果分别意味着什么见 [docs/manual-verification.md](docs/manual-verification.md) 第 8 步。
 - **路径形态**：`\\?\C:\…`、`\\?\UNC\…`、盘相对 `C:a.txt` 会被归一化，设备命名空间形态原样交给
@@ -159,7 +173,7 @@ MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 se
 `Cargo.lock` **入库**：交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2` 的精确解析结果才谈得上
 "官方形态可复现"。
 
-发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、166.4 KiB（压缩 53.7 KiB）并在隔离目录里
+发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、174.2 KiB（压缩 57.0 KiB）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
 `v0.1.0` 目前是**本地附注标签**，`main` 已推送；推送标签与真正的 `cargo publish`（需要 crates.io
 token）尚未执行。

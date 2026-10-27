@@ -3,7 +3,7 @@
 ## 怎么跑
 
 ```powershell
-cargo test                                          # 默认形态：50 passed / 3 ignored / 3 doctests
+cargo test                                          # 默认形态：52 passed / 3 ignored / 3 doctests
 cargo test --features official-bindings             # 官方绑定形态：同一基线
 cargo clippy --all-targets                          # 零警告（含 --features official-bindings）
 cargo +1.88.0 check --all-targets                   # MSRV 实测
@@ -15,12 +15,16 @@ REVEAL_LATENCY_TEST=1 cargo test --test latency -- --ignored --nocapture # 真�
 
 - 可注入边界：`Revealer` trait；`RecordingRevealer` 记录被要求选中的路径；二进制的
   `REVEAL_DRY_RUN=1|true|yes` 换成打印型实现 → 端到端测试**不会弹出资源管理器**。
-- `src/lib.rs` 单元测试 23 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
+- `src/lib.rs` 单元测试 25 个：参数个数/空参/缺失、相对路径按 cwd 解析、空格+中文、逗号+`&`、
   目录输入、尾分隔符、`..`、盘根拒绝、shell 失败映射为退出码 1、`REVEAL_TAB_POLICY` 默认值/
   大小写/非法值、`REVEAL_DRY_RUN` 的开/关/非法三档映射、每条 usage 错误以 `USAGE` 常量收尾
   （`--help` 里嵌的是同一个常量）、`Error` 确实实现了 `std::error::Error`（否则宿主项目的 `?`
   编译不过，而这没有别处守着），以及四种路径形态（`\\?\C:` 改写后仍走完整 reveal、
-  `\\?\UNC\` 还原成 UNC、盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；外加
+  `\\?\UNC\` 还原成 UNC、盘相对 `C:a.txt` 锚到盘根、设备命名空间形态原样不动）；加上库宿主专属的
+  两条——本线程已被宿主按 MTA 初始化时 `init_apartment` 必须回报"套间不是我们的"而不是失败
+  （`RPC_E_CHANGED_MODE` 是负 HRESULT，COM 却照常可用；这条真的调 `CoInitializeEx`，但不碰
+  shell，所以不开窗），以及两个 revealer 都满足 `Send + Sync + Revealer`（recorder 里换成
+  `RefCell` 就让宿主的 `Arc<dyn Revealer + Send + Sync>` 编译不过）；外加
   `src/automation.rs` 中路径匹配与标题可见性（前缀边界、中文、空名）6 个纯函数测试。
 - doctest 3 条（`cargo test --doc`）：crate 级与 `reveal_with` 两条标 `no_run`——它们调用真实
   shell，编译校验足够，执行就会在开发机上弹资源管理器窗口；`run` 一条用 `RecordingRevealer`
@@ -75,9 +79,11 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 ## 基线
 
 仓库原本没有 Cargo 工程（`cargo test` → `could not find Cargo.toml`），无既有功能可回归。
-最近一次全量复验（库面适配：`Switch` 再导出、`reveal_with`、`Error : std::error::Error`、
-`rust-version` 之后，两种形态各跑一遍，结果相同）：
-`cargo test` 与 `cargo test --features official-bindings` → 50 passed, 0 failed, 3 ignored，
+最近一次全量复验（2026-10-27，库宿主适配那批改动之后：`init_apartment` 三态、`RecordingRevealer`
+内部换成 `Mutex`、三段等待改退避且每轮只遍历一次；两种形态各跑一遍，结果相同）：
+`cargo test` 与 `cargo test --features official-bindings` → 52 passed, 0 failed, 3 ignored，
 另有 doctest 3 passed；`cargo clippy --all-targets`（含 `--features official-bindings`）零警告；
 `cargo +1.88.0 check --all-targets` 与 `cargo +1.88.0 test --doc` 通过（MSRV 实测）；
-`REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored` 在两种形态下各 → 2 passed。
+`REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored --test-threads=1` 在两种形态下各
+→ 2 passed，其中 `overwrite` 一档改造后仍实测到总标签数不变、target +1、foreground −1、标题栏
+换成目标目录；`REVEAL_LATENCY_TEST=1` 两形态各重跑一遍，新数字见 [latency.md](latency.md)。

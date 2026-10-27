@@ -16,7 +16,7 @@
 其余一切（CLI 框架、跨平台层、canonicalize、命令行拼接）都是不必要的实体，全部不引入。
 唯一保留的一次输入改写是路径形态归一化——它不是抽象层，而是下面那条实测约束的直接结果。
 
-## 路径形态归一化（`normalize`，[src/lib.rs:323](../src/lib.rs#L323)）
+## 路径形态归一化（`normalize`，[src/lib.rs:343](../src/lib.rs#L343)）
 
 `resolve` 在把路径交给 shell 命名空间之前改写三种写法，全部是 build 26100 上的实测结论：
 
@@ -54,15 +54,21 @@ FFI 层声明 7 个函数（`shell32` 的 `SHParseDisplayName`/`SHOpenFolderAndS
    Folder.Self.Path` 匹配目标父目录，在 `Folder.Items` 中按名匹配目标项并调用
    `FolderView.SelectItem`，随后把该窗口置前（含从最小化恢复）。命中就不再调用
    `SHOpenFolderAndSelectItems`。视图存在但条目尚未列出（刚创建的文件，Explorer 异步刷新）
-   时最多等 10×200ms 再放弃复用。
+   时最多再等 2 s 才放弃复用。
 2. 目录只存在于**后台标签**时（`Miss::Hidden`）按配置项分流：`overwrite` 对当前可见标签的
-   窗口对象调 `Navigate2(目标目录)`（实测有效，等待至多 10×150ms）后正常选中；`newtab`
-   **不调用**打开接口——实测对一个已经开着的目录再调 `SHOpenFolderAndSelectItems` 只会
-   在后台标签里静默选中（用户看不见），于是改由 `explorer.exe <目录>` 把该标签带到前台，
-   选中仍由第 1 步的 `FolderView.SelectItem` 完成。
+   窗口对象调 `Navigate2(目标目录)`（实测有效；导航是异步的，最多等 1.5 s 让它上屏）后正常
+   选中；`newtab` **不调用**打开接口——实测对一个已经开着的目录再调
+   `SHOpenFolderAndSelectItems` 只会在后台标签里静默选中（用户看不见），于是改由
+   `explorer.exe <目录>` 把该标签带到前台，选中仍由第 1 步的 `FolderView.SelectItem` 完成。
 3. 没有任何标签匹配时才调用 `SHOpenFolderAndSelectItems` 打开目录。本机 shell（build 26100）
    在**新建**窗口时丢弃它的选中请求（见 [research.md](research.md)），因此打开后再走第 1 步
-   同一条路补选中并置前，最多重试 15×200ms 等待窗口创建完成。
+   同一条路补选中并置前，最多等 3 s 等待窗口创建完成。
+
+三段等待共用 `poll_within`（[src/automation.rs:385](../src/automation.rs#L385)）：25 ms 起步、
+每轮 ×1.5、200 ms 封顶，按墙钟预算截止。之前它们是固定 200 ms 一格，于是 5 ms 就到账的结果
+也要等满一格——那部分是我们自己加的，不是 shell 的；改成退避后"条目刚写入"那一档的取值由
+Explorer 自己的刷新速度决定（[latency.md](latency.md)）。每一轮的 `Shell.Windows` 遍历也只剩
+一遍：`Miss` 的两种"没选中"都带上帧 HWND，置前不再需要第二次全量重举。
 
 标签页的四个实测事实决定了上面的形状：
 
