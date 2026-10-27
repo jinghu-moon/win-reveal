@@ -20,7 +20,9 @@ cargo build --release --features official-bindings   # 换官方绑定形态，�
 ```
 
 在 `Cargo.toml` 里被依赖。这个 crate 在非 Windows 目标直接 `compile_error!`（没有跨平台桩），
-所以跨平台宿主要把依赖挂在 cfg 下，否则在 Linux/macOS 上连 `cargo check` 都过不去：
+所以跨平台宿主要把依赖挂在 cfg 下，否则在 Linux/macOS 上连 `cargo check` 都过不去——用
+`--target x86_64-linux-android` 实测：9 条错误，第一条是那句 `compile_error!`，其余来自
+`std::os::windows` 与 UTF-16 转换，属于"这里根本没有实现"的正常表现：
 
 ```toml
 [target.'cfg(windows)'.dependencies]
@@ -161,19 +163,27 @@ REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored          # 真弹窗�
 | [docs/testing.md](docs/testing.md) | 每个测试目标守住什么、交叉校验、真弹窗测试的序列化与残留、最近一次基线 |
 | [docs/latency.md](docs/latency.md) | A–F 六档时延数据与读法 |
 | [docs/manual-verification.md](docs/manual-verification.md) | 9 步人工复核清单（真实弹窗与选中） |
+| [CHANGELOG.md](CHANGELOG.md) | 0.1.0 的公开面清单、已知限制，以及 0.x 的版本策略 |
 
 ## 许可与仓库内容
 
 MIT，全文见 [LICENSE-MIT](LICENSE-MIT)，版权抬头 `Copyright (c) 2026 seeyuer`；
-仓库 <https://github.com/jinghu-moon/win-reveal>。
+仓库 <https://github.com/jinghu-moon/win-reveal>。`[package] authors` 同样署 `seeyuer`，
+不放邮箱——这行字会原样出现在 crates.io 上并被索引。
 
 `.gitignore` 排除三样东西，各带一条理由：`target/`（497 MB 可再生产物）、
 `rust_sources/`（调研用的**第三方源码**，提交进可发布的仓库等于由我们承担再分发义务；来源记在
 `download-rust-repos.ps1`）、`tmp/`（人工验证的中文+逗号+空格夹具）。
 `Cargo.lock` **入库**：交付的是一个要被人复制走的 exe，锁定 `windows 0.62.2` 的精确解析结果才谈得上
-"官方形态可复现"。
+"官方形态可复现"。`download-rust-repos.ps1` 入库但用 `[package] exclude` 挡在 crate 外：
+打包环境里没有 `rust_sources/` 可写，那个脚本进 crate 就是一件不能用的东西。
 
-发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、174.2 KiB（压缩 57.0 KiB）并在隔离目录里
+分类取自 crates.io 的分类表并已核实：`os::windows-apis`（库）+ `command-line-utilities`（`reveal`
+这个二进制）。文档站在本地是 `cargo doc --no-deps`；docs.rs 那侧因为 crate 在非 Windows 目标
+`compile_error!`，那个站点的构建机上编译不过，所以**不要把 docs.rs 链接当"文档在这里"用**——
+读 README 与 `docs/`。
+
+发布前校验已过：`cargo publish --dry-run` 打包 23 个文件、176.8 KiB（压缩 57.9 KiB）并在隔离目录里
 重新编译校验，最后一行 `warning: aborting upload due to dry run` 是它的正常收尾。
 `v0.1.0` 目前是**本地附注标签**，且停在两次提交之前——真要发布前先决定标签挪到哪棵树。
 推送 `main` 与标签、以及真正的 `cargo publish`（需要 crates.io token）都还没执行。

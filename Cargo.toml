@@ -2,15 +2,25 @@
 name = "win-reveal"
 version = "0.1.0"
 edition = "2021"
+# Signed as the person, not as the GitHub account: the two names differ, and this field is
+# published verbatim on crates.io. No address here on purpose — the metadata is indexed.
+authors = ["seeyuer"]
 # Verified floor, not an aspirational one: `cargo +1.88.0 check --all-targets` (both binding
 # flavours) and `cargo +1.88.0 test --doc` pass here. The source only uses features as old as
 # let-else, but lower than 1.88 is unmeasured on this machine — no older toolchain installed.
 rust-version = "1.88"
 description = "Windows-only: open a file's containing folder in Explorer and select the item"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/jinghu-moon/win-reveal"
 keywords = ["windows", "explorer", "reveal", "select", "shell"]
-categories = ["os::windows-apis"]
+# `os::windows-apis` for the library, `command-line-utilities` for the `reveal` binary. Both
+# slugs verified against the crates.io taxonomy API (200; a made-up slug gives 404).
+categories = ["os::windows-apis", "command-line-utilities"]
+# Kept in the repository (it is where the third-party sources surveyed in docs/research.md come
+# from) but not in the shipped crate: inside a package there is no `rust_sources/` to write to,
+# so the script would be a file that cannot do anything.
+exclude = ["download-rust-repos.ps1"]
 
 # The command is `reveal`, not `win-reveal`: it is what a person types at a prompt, and the
 # crate name carries the platform qualifier the binary cannot.

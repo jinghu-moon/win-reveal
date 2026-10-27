@@ -87,3 +87,9 @@ UIA 树里（两个同目录标签都报 `IsSelected=True`），所以"用户看
 `REVEAL_UI_TEST=1 cargo test --test ui_reveal -- --ignored --test-threads=1` 在两种形态下各
 → 2 passed，其中 `overwrite` 一档改造后仍实测到总标签数不变、target +1、foreground −1、标题栏
 换成目标目录；`REVEAL_LATENCY_TEST=1` 两形态各重跑一遍，新数字见 [latency.md](latency.md)。
+
+同日发布元数据收口之后（只动 `Cargo.toml`、README、新增 `CHANGELOG.md`，源码未变），上面这组
+数字原样复现；额外两项发布前校验：`cargo package --list` 打出的 23 个文件里含 `CHANGELOG.md`、
+不含被 `[package] exclude` 挡下的 `download-rust-repos.ps1`；`cargo publish --dry-run` 在隔离目录里
+重新编译通过（176.8 KiB / 压缩 57.9 KiB）。非 Windows 目标的报错面用
+`cargo check --target x86_64-linux-android` 量过：9 条错误，首条即 crate 里那句 `compile_error!`。
