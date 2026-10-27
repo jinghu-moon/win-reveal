@@ -1,14 +1,18 @@
 // Cross-check the hand-rolled shell bindings against the official `windows` crate.
 //
 // Compiled only for `cargo test`; the shipped binary still links nothing but system DLLs.
-// Only namespace *parsing* runs here — never `SHOpenFolderAndSelectItems` — so no Explorer
-// window is opened and these tests belong to the default suite.
+// The parsing and argument-marshalling paths run here; the one thing that still never runs is
+// `SHOpenFolderAndSelectItems` with a *real* folder, because that opens an Explorer window. A
+// null folder is allowed and measured to fail before any window is created — see
+// `both_bindings_refuse_a_null_folder_before_opening_one`.
 //
 // What is being verified:
 //   1. the verbatim-path failure that [`normalize`] works around is a property of the API,
 //      not of our declarations: the official binding returns the same HRESULT;
 //   2. the (parent, child) split that reveal feeds to `SHOpenFolderAndSelectItems` is exactly
-//      what the official `IL*` helpers compute for the same path.
+//      what the official `IL*` helpers compute for the same path;
+//   3. the null-folder and null-PIDL edges both bindings must agree on, because reveal's error
+//      paths reach them.
 //
 // The hand-rolled side is reached as `ffi::native`, never through the flavour the build
 // selected: under `--features official-bindings` the two sides would otherwise be the same
@@ -50,6 +54,14 @@ fn our_hr(path: &Path) -> u32 {
 fn wide_name(path: &Path) -> HSTRING {
     let text: Vec<u16> = path.as_os_str().encode_wide().collect();
     HSTRING::from_wide(&text)
+}
+
+/// A crate `Result` down to the same `u32` HRESULT number the native flavour returns.
+fn code_of(outcome: windows::core::Result<()>) -> u32 {
+    match outcome {
+        Ok(()) => 0,
+        Err(error) => error.code().0 as u32,
+    }
 }
 
 fn encode(path: &Path) -> Vec<u16> {
@@ -163,4 +175,39 @@ fn our_parent_child_split_matches_the_official_helpers() {
     }
 
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The reveal call itself, at the one argument that cannot open a window.
+///
+/// `SHOpenFolderAndSelectItems` is what the whole crate exists to call, yet until now no test
+/// compared how the two bindings marshal its arguments — a real folder would pop Explorer. A
+/// null folder is the safe exception: measured on build 26100 it returns `E_INVALIDARG` before
+/// a window is created (`Shell.Windows` count unchanged across the call), so this pins the
+/// four-parameter signature (`pidl_folder, cidl, apidl, dw_flags`) and the `Option`/slice
+/// reconstruction in the official wrapper against the same failure through the native one.
+#[test]
+fn both_bindings_refuse_a_null_folder_before_opening_one() {
+    let _com = Com::init();
+    let ours = unsafe { ffi::native::SHOpenFolderAndSelectItems(ptr::null(), 0, ptr::null(), 0) };
+    let theirs = unsafe {
+        Shell::SHOpenFolderAndSelectItems(ptr::null(), None::<&[*const ITEMIDLIST]>, 0u32)
+    };
+    assert_eq!(ours as u32, 0x8007_0057, "the null folder no longer fails the way it measured");
+    assert_eq!(
+        code_of(theirs),
+        0x8007_0057,
+        "the official binding marshals the null folder to a different failure"
+    );
+}
+
+/// The PIDL every parse failure leaves behind.
+///
+/// When `SHParseDisplayName` fails our code still hands the (null) PIDL to `ILFree`, so a null
+/// free is a live path, not a hypothetical: measured on build 26100 to be a safe no-op. Both
+/// bindings must tolerate it, because they release the same shell-allocated blocks.
+#[test]
+fn both_bindings_free_a_null_pidl_without_crashing() {
+    let _com = Com::init();
+    unsafe { ffi::native::ILFree(ptr::null_mut()) };
+    unsafe { Shell::ILFree(None) };
 }

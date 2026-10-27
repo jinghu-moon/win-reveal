@@ -15,10 +15,11 @@
 #[cfg(feature = "official-bindings")]
 mod official;
 
-// Compiled in both flavours: the cross-check test measures whichever flavour is active
-// against these declarations, so they have to stay reachable even when the feature picks
-// `official`.
-#[cfg_attr(all(feature = "official-bindings", not(test)), allow(dead_code))]
+// Reachable in the default build (it *is* the binding there) and under `cargo test` with the
+// feature on, because the cross-check test measures the official flavour against these
+// declarations. A release build with `official-bindings` has no use for them and does not
+// compile them.
+#[cfg(any(not(feature = "official-bindings"), test))]
 pub(crate) mod native;
 
 #[cfg(feature = "official-bindings")]

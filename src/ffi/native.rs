@@ -5,9 +5,9 @@
 
 use std::os::raw::c_void;
 
-// Compiled even when `--features official-bindings` selects the other flavour: the cross-check test
-// compares the two, so an unused declaration here is a second opinion, not dead code.
-#[allow(dead_code)]
+// Every declaration here has a caller in at least one of the two shapes this module is compiled for:
+// it is the binding in the default build, and under `cargo test --features official-bindings` the
+// cross-check calls each one to compare it with the official wrapper.
 #[link(name = "shell32")]
 extern "system" {
     pub fn SHParseDisplayName(
